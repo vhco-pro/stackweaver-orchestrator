@@ -28,6 +28,8 @@ jobs:
           project: stackweaver-orchestrator
           platforms: linux/amd64,linux/arm64
           context: .
+          cache-from: type=registry,ref=ghcr.io/vhco-pro/stackweaver-orchestrator:buildcache
+          cache-to: type=registry,ref=ghcr.io/vhco-pro/stackweaver-orchestrator:buildcache,mode=max
 
   # bump-helm:
   #   needs: release
