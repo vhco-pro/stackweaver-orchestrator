@@ -20,7 +20,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM gcr.io/distroless/static@sha256:47b2d72ff90843eb8a768b5c2f89b40741843b639d065b9b937b07cd59b479c6
 
 COPY --from=builder /build/stackweaver-orchestrator /stackweaver-orchestrator
-COPY --from=builder /build/config /etc/iac/config
 
 LABEL org.opencontainers.image.source="https://github.com/vhco-pro/stackweaver-orchestrator"
 LABEL org.opencontainers.image.licenses="BUSL-1.1"
