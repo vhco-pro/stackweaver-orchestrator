@@ -5,8 +5,8 @@ package main
 import (
 	"testing"
 
-	"github.com/iac-platform/backend/internal/models"
-	"github.com/iac-platform/backend/internal/services/vcs"
+	"github.com/michielvha/stackweaver/core/models"
+	"github.com/michielvha/stackweaver/core/services/vcs"
 )
 
 func TestExtractPRNumber(t *testing.T) {
