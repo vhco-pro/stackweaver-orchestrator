@@ -12,15 +12,19 @@ docker pull ghcr.io/vhco-pro/stackweaver-orchestrator:latest
 
 See the [Stackweaver documentation](https://github.com/vhco-pro/stackweaver) for deployment instructions.
 
+
 ## Verifying this Distribution
 
 Every image published by this satellite is Sigstore-signed (keyless, via Fulcio + Rekor) and ships with build-provenance and SBOM attestations. To verify a specific tag:
 
 ```bash
-cosign verify   --certificate-identity-regexp "^https://github\.com/vhco-pro/stackweaver-/\.github/workflows/release\.yml@refs/tags/.+2174731"   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"   ghcr.io/vhco-pro/stackweaver-:<tag>
+cosign verify \
+  --certificate-identity-regexp "^https://github\.com/vhco-pro/stackweaver-orchestrator/\.github/workflows/release\.yml@refs/tags/.+$" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/vhco-pro/stackweaver-orchestrator:<tag>
 ```
 
-The full verification guide — including SLSA provenance, SBOM extraction, and  for sync commits — lives at <https://sw.vhco.pro/docs/security/verifying-releases>.
+The full verification guide — including SLSA provenance, SBOM extraction, and `gitsign verify` for sync commits — lives at <https://sw.vhco.pro/docs/security/verifying-releases>.
 
 ## License
 
