@@ -1,4 +1,4 @@
-# Stackweaver™ Orchestrator
+# Stackweaver Orchestrator
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vhco-pro/stackweaver-orchestrator/badge)](https://scorecard.dev/viewer/?uri=github.com/vhco-pro/stackweaver-orchestrator)
 
