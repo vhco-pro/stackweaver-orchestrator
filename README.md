@@ -1,5 +1,7 @@
 # Stackweaver™ Orchestrator
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vhco-pro/stackweaver-orchestrator/badge)](https://scorecard.dev/viewer/?uri=github.com/vhco-pro/stackweaver-orchestrator)
+
 The job scheduler for the [Stackweaver](https://github.com/vhco-pro/stackweaver) DevOps platform.
 
 > **This repository is auto-synced from the Stackweaver monorepo. Do not make changes here directly.**
