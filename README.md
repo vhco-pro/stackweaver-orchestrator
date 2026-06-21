@@ -2,7 +2,7 @@
 
 <img src="https://sw.vhco.pro/logo.png" alt="Stackweaver" width="150" />
 
-# Stackweaver™ Orchestrator
+# Stackweaver Orchestrator
 
 [![Release](https://github.com/vhco-pro/stackweaver-orchestrator/actions/workflows/release.yml/badge.svg)](https://github.com/vhco-pro/stackweaver-orchestrator/actions/workflows/release.yml)
 [![Latest Release](https://img.shields.io/github/v/release/vhco-pro/stackweaver-orchestrator?sort=semver)](https://github.com/vhco-pro/stackweaver-orchestrator/releases/latest)
