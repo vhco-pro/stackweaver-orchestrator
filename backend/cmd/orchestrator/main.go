@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/core/crypto"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/queue"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -111,10 +112,25 @@ func main() {
 		logger.Info("Azure DevOps status check service initialized for PR status checks")
 	}
 
+	// Resolve the encryption-at-rest key so the registry can decrypt VCS connection
+	// tokens at rest (#95) and re-encrypt refreshed tokens. Unlike the api/runner —
+	// which require the key for variables/state/credentials and so fail loud (AUD-013)
+	// — the orchestrator only needs it for the optional VCS path, so resolution here is
+	// best-effort: a missing/invalid key logs a warning and leaves crypto nil (tokens
+	// treated as plaintext, exactly as before #95), never crashing the scheduler.
+	var atRestCrypto *crypto.CryptoService
+	if keyBytes, keyErr := crypto.DeriveKey(os.Getenv("ENCRYPTION_KEY")); keyErr != nil {
+		logger.Warnf("VCS token decryption disabled (ENCRYPTION_KEY %v); set it to match the API to enable encrypted VCS connections", keyErr)
+	} else if cs, csErr := crypto.NewCryptoService(keyBytes); csErr != nil {
+		logger.Warnf("VCS token decryption disabled: %v", csErr)
+	} else {
+		atRestCrypto = cs
+	}
+
 	// Create a provider registry for ADO token refresh
 	vcsRegistry := vcs.NewProviderRegistry(githubAppManager, azureDevOpsManager, func(conn *models.VCSConnection) error {
 		return vcsConnectionRepo.Update(conn)
-	})
+	}, atRestCrypto)
 
 	// Start orchestrator
 	ctx, cancel := context.WithCancel(context.Background())
