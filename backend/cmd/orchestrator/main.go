@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,6 +85,7 @@ func main() {
 	configVersionRepo := repository.NewConfigurationVersionRepository(db)
 	vcsConnectionRepo := repository.NewVCSConnectionRepository(db)
 	agentPoolRepo := repository.NewAgentPoolRepository(db)
+	ansibleJobRepo := repository.NewAnsibleJobRepository(db)
 
 	// Initialize GitHub App Manager and status service for PR status checks
 	var statusService *vcs.GitHubStatusService
@@ -136,8 +138,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// AUD-132: track the worker goroutines so SIGTERM waits for their current iteration to finish
+	// (drain) instead of returning immediately and killing in-flight DB writes mid-statement.
+	var wg sync.WaitGroup
+
 	// Process pending runs every 5 seconds
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		logger.Info("Orchestrator started - processing pending runs")
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -154,9 +162,11 @@ func main() {
 		}
 	}()
 
-	// Clean up stuck runs every 1 minute
+	// Clean up stuck runs and stuck ansible jobs every 1 minute
+	wg.Add(1)
 	go func() {
-		logger.Info("Orchestrator started - cleaning up stuck runs")
+		defer wg.Done()
+		logger.Info("Orchestrator started - cleaning up stuck runs and ansible jobs")
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
@@ -168,12 +178,18 @@ func main() {
 				if err := cleanupStuckRuns(ctx, runRepo); err != nil {
 					logger.Errorf("Error cleaning up stuck runs: %v", err)
 				}
+				if err := cleanupStuckAnsibleJobs(ctx, ansibleJobRepo); err != nil {
+					logger.Errorf("Error cleaning up stuck ansible jobs: %v", err)
+				}
+				reclaimOrphanedQueueMessages(ctx, redisQueue)
 			}
 		}
 	}()
 
 	// Update PR status checks every 10 seconds
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		logger.Info("Orchestrator started - updating PR status checks")
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -195,8 +211,18 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
+	// AUD-132: graceful shutdown — cancel the context and wait (bounded) for the workers to
+	// finish their current iteration so we don't abandon in-flight DB writes.
 	logger.Info("Shutting down orchestrator...")
 	cancel()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		logger.Info("Orchestrator workers drained; exiting")
+	case <-time.After(10 * time.Second):
+		logger.Warn("Timed out waiting for orchestrator workers to drain; exiting")
+	}
 }
 
 func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRepo *repository.RunRepository, workspaceRepo *repository.WorkspaceRepository, agentPoolRepo *repository.AgentPoolRepository) error {
@@ -218,10 +244,23 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 	runs = append(runs, applyingRuns...)
 
 	for _, run := range runs {
-		// Skip runs that are too old - they should be cleaned up by cleanupStuckRuns
-		// This prevents re-enqueueing abandoned runs
-		if time.Since(run.CreatedAt) > 30*time.Minute {
-			logger.Infof("Skipping enqueue for old pending run %s (created %s ago), it should be cleaned up by the stuck run cleaner.", run.ID, time.Since(run.CreatedAt).Round(time.Second))
+		// Skip runs that are too old — abandoned ones are handled by cleanupStuckRuns. AUD-110:
+		// the age must be measured from the CURRENT phase's start, not from run creation. A
+		// plan-and-apply run that a human reviews for 30+ minutes before clicking "Confirm & Apply"
+		// has an old CreatedAt but a freshly-confirmed apply; keying the skip on CreatedAt wedged
+		// it in `applying` forever (the completely normal review-then-apply flow). For applying
+		// runs use ApplyStartedAt (nil until a runner picks it up → age 0 → enqueue); for pending
+		// runs keep CreatedAt.
+		var age time.Duration
+		if run.Status == models.RunStatusApplying {
+			if run.ApplyStartedAt != nil {
+				age = time.Since(*run.ApplyStartedAt)
+			}
+		} else {
+			age = time.Since(run.CreatedAt)
+		}
+		if age > 30*time.Minute {
+			logger.Infof("Skipping enqueue for old run %s (status=%s, phase age %s), it should be cleaned up by the stuck run cleaner.", run.ID, run.Status, age.Round(time.Second))
 			continue
 		}
 
@@ -279,6 +318,21 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 			}
 		}
 
+		// AUD-007/112: atomically claim the run for dispatch BEFORE enqueueing. The claim succeeds
+		// for exactly one caller, so this run is enqueued to Redis at most once — no more
+		// re-enqueueing the same run every 5s tick while a runner is busy (duplicate plans), and no
+		// second concurrent apply of an `applying` run. A run whose claim we don't win (already
+		// dispatched, or its status changed) is simply skipped this tick.
+		claimed, err := runRepo.ClaimForDispatch(reloadedRun.ID)
+		if err != nil {
+			logger.Errorf("Failed to claim run %s for dispatch: %v", reloadedRun.ID, err)
+			continue
+		}
+		if !claimed {
+			logger.Debugf("Run %s already dispatched (or no longer dispatchable); skipping enqueue", reloadedRun.ID)
+			continue
+		}
+
 		// Create job struct matching runner's Job type
 		job := map[string]interface{}{
 			"run_id":       reloadedRun.ID,
@@ -289,6 +343,8 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 		// Enqueue expects interface{} and will marshal it itself
 		// Don't marshal here to avoid double-marshaling
 		if err := redisQueue.Enqueue(ctx, "runs", job); err != nil {
+			// Roll back the claim so the run can be re-dispatched on a later tick.
+			_ = runRepo.ClearDispatch(reloadedRun.ID)
 			logger.Errorf("Failed to enqueue job: %v", err)
 			continue
 		}
@@ -318,18 +374,20 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 
 	for _, run := range stuckRuns {
 		var errorMessage string
-		if run.Status == models.RunStatusRunning {
-			// Running run that exceeded timeout
+		if run.Status == models.RunStatusPending {
+			// Pending run that was abandoned (more than 30 minutes)
+			errorMessage = "Run was pending for too long and was automatically cancelled"
+		} else {
+			// Actively-executing run (planning/applying/legacy running) that exceeded its timeout.
 			timeout := 3600 // Default 1 hour
 			if run.Workspace.RunTimeout > 0 {
 				timeout = run.Workspace.RunTimeout
 			}
 			errorMessage = fmt.Sprintf("Run exceeded timeout of %d seconds and was automatically cancelled", timeout)
-		} else {
-			// Pending run that was abandoned (more than 30 minutes)
-			errorMessage = "Run was pending for too long and was automatically cancelled"
 		}
 
+		// MarkAsFailed is guarded (AUD-132) — it no-ops if the run already reached a terminal
+		// state between the sweep query and now, so it cannot ping-pong a finished run to failed.
 		if err := runRepo.MarkAsFailed(run.ID, errorMessage); err != nil {
 			logger.Errorf("Failed to mark run %s as failed: %v", run.ID, err)
 			continue
@@ -338,6 +396,49 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 		logger.Infof("Marked stuck run %s as failed: %s", run.ID, errorMessage)
 	}
 
+	return nil
+}
+
+// reclaimOrphanedQueueMessages requeues in-flight queue messages whose consumer died permanently
+// and never restarted to recover its own processing list (AUD-015 — the multi-replica case). The
+// 6h threshold is well beyond any legitimate run/job processing time (terraform run timeout defaults
+// to 2h and the stuck-run/job reapers fail anything past its timeout), so a healthy long-running job
+// is never reclaimed; the AUD-006 state lock is the final backstop against a reclaimed duplicate.
+func reclaimOrphanedQueueMessages(ctx context.Context, redisQueue *queue.RedisQueue) {
+	const threshold = 6 * time.Hour
+	for _, qn := range []string{"runs", "ansible_jobs", "ansible_sync"} {
+		if n, err := redisQueue.Reclaim(ctx, qn, threshold); err != nil {
+			logger.Errorf("Error reclaiming orphaned %s messages: %v", qn, err)
+		} else if n > 0 {
+			logger.Infof("Reclaimed %d orphaned %s message(s) from a permanently-dead consumer", n, qn)
+		}
+	}
+}
+
+// cleanupStuckAnsibleJobs recovers Ansible jobs whose executor died mid-run, leaving them stuck
+// in `running` forever (AUD-016 — Ansible previously had no stuck-job recovery at all). Uses a
+// 1-hour default timeout when a job carries no explicit TimeoutSeconds.
+func cleanupStuckAnsibleJobs(ctx context.Context, jobRepo *repository.AnsibleJobRepository) error {
+	stuckJobs, err := jobRepo.FindStuckJobs(time.Hour)
+	if err != nil {
+		return fmt.Errorf("failed to find stuck ansible jobs: %w", err)
+	}
+	if len(stuckJobs) == 0 {
+		return nil
+	}
+
+	logger.Infof("Found %d stuck ansible job(s), marking as failed", len(stuckJobs))
+	for _, job := range stuckJobs {
+		msg := "Ansible job exceeded its timeout and was automatically failed (runner presumed dead)"
+		ok, failErr := jobRepo.FailIfRunning(job.ID, msg)
+		if failErr != nil {
+			logger.Errorf("Failed to mark stuck ansible job %s as failed: %v", job.ID.String(), failErr)
+			continue
+		}
+		if ok {
+			logger.Infof("Marked stuck ansible job %s as failed", job.ID.String())
+		}
+	}
 	return nil
 }
 
@@ -369,8 +470,8 @@ func updatePRStatusChecks(
 
 	logger.Infof("[STATUS_CHECK] Found %d PR run(s) to check for status check updates", len(runs))
 
-	for _, run := range runs {
-		updatePRStatusCheck(ctx, &run, workspaceRepo, configVersionRepo, vcsConnectionRepo, statusService, adoStatusService, vcsRegistry)
+	for i := range runs {
+		updatePRStatusCheck(ctx, &runs[i], runRepo, workspaceRepo, configVersionRepo, vcsConnectionRepo, statusService, adoStatusService, vcsRegistry)
 	}
 
 	return nil
