@@ -21,6 +21,7 @@ import (
 func updatePRStatusCheck(
 	ctx context.Context,
 	run *models.Run,
+	runRepo *repository.RunRepository,
 	workspaceRepo *repository.WorkspaceRepository,
 	configVersionRepo *repository.ConfigurationVersionRepository,
 	vcsConnectionRepo *repository.VCSConnectionRepository,
@@ -28,6 +29,19 @@ func updatePRStatusCheck(
 	adoStatusService *vcs.AzureDevOpsStatusService,
 	vcsRegistry *vcs.ProviderRegistry,
 ) {
+	// Determine the target status check state first, and skip entirely if it has not changed
+	// since we last posted it (AUD-111). Without this the orchestrator re-POSTed the same commit
+	// status every 10s forever — GitHub creates a new status object per POST and hard-caps 1000
+	// per SHA. Doing the check up front also stops the per-run log spam and DB lookups for the
+	// (overwhelmingly common) unchanged case (part of AUD-132).
+	state, description, ok := mapRunStatusToCheckState(run)
+	if !ok {
+		return
+	}
+	if string(state) == run.LastCommitStatusState {
+		return
+	}
+
 	logger.Infof("[STATUS_CHECK] updatePRStatusCheck called for run %s, status=%s", run.ID, run.Status)
 
 	// Only update status checks for speculative (PR) runs with commit hash
@@ -85,32 +99,37 @@ func updatePRStatusCheck(
 	owner := parts[0]
 	repo := parts[1]
 
-	// Determine status check state and description based on run status
-	state, description, ok := mapRunStatusToCheckState(run)
-	if !ok {
-		return
-	}
-
 	// Generate target URL
 	targetURL := buildTargetURL(workspace, run.ID)
 
 	// Status check context: terraform-plan/<workspace-name>
 	statusContext := fmt.Sprintf("terraform-plan/%s", workspace.Name)
 
-	// Dispatch to the correct provider
+	// Dispatch to the correct provider. posted is true only when the provider actually accepted
+	// the status; we persist the new state only then so a failed POST is retried next tick.
+	posted := false
 	switch vcsConn.Provider {
 	case models.VCSProviderGitHub:
-		updateGitHubStatusCheck(ctx, run, vcsConn, owner, repo, configVersion.CommitHash, statusContext, state, description, targetURL, statusService)
+		posted = updateGitHubStatusCheck(ctx, run, vcsConn, owner, repo, configVersion.CommitHash, statusContext, state, description, targetURL, statusService)
 	case models.VCSProviderAzureDevOps:
-		updateADOStatusCheck(ctx, run, vcsConn, configVersion, owner, repo, statusContext, state, description, targetURL, adoStatusService, vcsRegistry)
+		posted = updateADOStatusCheck(ctx, run, vcsConn, configVersion, owner, repo, statusContext, state, description, targetURL, adoStatusService, vcsRegistry)
 	case models.VCSProviderGitLab, models.VCSProviderBitbucket:
 		logger.Infof("[STATUS_CHECK] Provider %s does not support PR status checks yet, skipping for run %s", vcsConn.Provider, run.ID)
 	default:
 		logger.Infof("[STATUS_CHECK] Provider %s does not support PR status checks, skipping for run %s", vcsConn.Provider, run.ID)
 	}
+
+	// Record the posted state so we don't re-POST it next tick (AUD-111).
+	if posted {
+		if err := runRepo.SetLastCommitStatusState(run.ID, string(state)); err != nil {
+			logger.Warnf("[STATUS_CHECK] Failed to persist last status state for run %s: %v", run.ID, err)
+		}
+	}
 }
 
 // updateGitHubStatusCheck posts a commit status via the GitHub Status API.
+// updateGitHubStatusCheck posts a commit status via the GitHub Status API and returns true only
+// if the status was successfully posted (so the caller can record it and stop re-posting).
 func updateGitHubStatusCheck(
 	ctx context.Context,
 	run *models.Run,
@@ -119,26 +138,28 @@ func updateGitHubStatusCheck(
 	state vcs.StatusState,
 	description, targetURL string,
 	statusService *vcs.GitHubStatusService,
-) {
+) bool {
 	if statusService == nil {
 		logger.Infof("[STATUS_CHECK] GitHub status service is nil, skipping for run %s", run.ID)
-		return
+		return false
 	}
 	if vcsConn.InstallationID == "" {
 		logger.Infof("[STATUS_CHECK] VCS connection %s has no installation ID, skipping GitHub status check", vcsConn.ID)
-		return
+		return false
 	}
 
 	logger.Infof("[STATUS_CHECK] Updating GitHub status check for run %s: state=%s, context=%s, sha=%s, repo=%s/%s", run.ID, state, statusContext, commitHash, owner, repo)
 	err := statusService.UpdateStatusCheck(ctx, vcsConn.InstallationID, owner, repo, commitHash, statusContext, state, description, targetURL)
 	if err != nil {
 		logger.Warnf("[STATUS_CHECK] ERROR - Failed to update GitHub status check for run %s: %v", run.ID, err)
-	} else {
-		logger.Infof("[STATUS_CHECK] SUCCESS - Updated GitHub status check for run %s: state=%s, description=%s", run.ID, state, description)
+		return false
 	}
+	logger.Infof("[STATUS_CHECK] SUCCESS - Updated GitHub status check for run %s: state=%s, description=%s", run.ID, state, description)
+	return true
 }
 
-// updateADOStatusCheck posts a PR status via the Azure DevOps Pull Request Status API.
+// updateADOStatusCheck posts a PR status via the Azure DevOps Pull Request Status API and returns
+// true only if the status was successfully posted.
 func updateADOStatusCheck(
 	ctx context.Context,
 	run *models.Run,
@@ -149,10 +170,10 @@ func updateADOStatusCheck(
 	description, targetURL string,
 	adoStatusService *vcs.AzureDevOpsStatusService,
 	vcsRegistry *vcs.ProviderRegistry,
-) {
+) bool {
 	if adoStatusService == nil {
 		logger.Infof("[STATUS_CHECK] Azure DevOps status service is nil, skipping for run %s", run.ID)
-		return
+		return false
 	}
 
 	// Get PR number from the dedicated field
@@ -163,7 +184,7 @@ func updateADOStatusCheck(
 	}
 	if prNumber == 0 {
 		logger.Infof("[STATUS_CHECK] No PR number found for run %s (committer=%q, pr_number=%d), skipping ADO status", run.ID, configVersion.Committer, configVersion.PRNumber)
-		return
+		return false
 	}
 
 	// Get a fresh token for the ADO API call
@@ -188,9 +209,10 @@ func updateADOStatusCheck(
 	err := adoStatusService.CreateOrUpdatePRStatus(ctx, token, vcsConn.AccountName, project, repo, prNumber, state, statusContext, description, targetURL)
 	if err != nil {
 		logger.Warnf("[STATUS_CHECK] ERROR - Failed to update ADO PR status for run %s: %v", run.ID, err)
-	} else {
-		logger.Infof("[STATUS_CHECK] SUCCESS - Updated ADO PR status for run %s: state=%s, description=%s", run.ID, state, description)
+		return false
 	}
+	logger.Infof("[STATUS_CHECK] SUCCESS - Updated ADO PR status for run %s: state=%s, description=%s", run.ID, state, description)
+	return true
 }
 
 // extractPRNumber parses a PR number from the committer field (format: "PR #N").
