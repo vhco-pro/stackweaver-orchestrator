@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/crypto"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/queue"
@@ -147,6 +149,18 @@ func main() {
 	}
 	notificationSvc := notification.NewService(repository.NewNotificationConfigurationRepository(db), notifCrypto, os.Getenv("STACKWEAVER_APP_URL"))
 
+	// change_request:created delivery (tfe_team_notification_configuration). The audience is every team
+	// that can reach the change request's workspace, which is an rbac question (a union of direct,
+	// project, org-wide and owners access), so it is resolved here and passed into the notifier: core
+	// must not import backend.
+	changeRequestRepo := repository.NewChangeRequestRepository(db)
+	changeRequestUserRepo := repository.NewUserRepository(db)
+	changeRequestRBAC := rbac.NewServiceWithTeams(
+		repository.NewOrganizationRepository(db),
+		repository.NewTeamRepository(db),
+		repository.NewProjectRepository(db),
+	)
+
 	// Start orchestrator
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -234,6 +248,25 @@ func main() {
 				return
 			case <-ticker.C:
 				processRunNotifications(ctx, runRepo, notificationSvc)
+			}
+		}
+	}()
+
+	// Deliver change-request notifications (tfe_team_notification_configuration) every 10 seconds. Fires
+	// once per change request, to the configs of every team that can reach its workspace.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("Orchestrator started - delivering change request notifications")
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processChangeRequestNotifications(ctx, changeRequestRepo, changeRequestRBAC, changeRequestUserRepo, notificationSvc)
 			}
 		}
 	}()
@@ -513,6 +546,66 @@ func processRunNotifications(ctx context.Context, runRepo *repository.RunReposit
 		})
 		if err := runRepo.MarkNotified(run.ID, run.Status); err != nil {
 			logger.Warnf("notifications: mark run %s notified: %v", run.ID, err)
+		}
+	}
+}
+
+// processChangeRequestNotifications delivers change_request:created to the notification configs of every
+// team that can reach each new change request's workspace, then stamps the marker. Same best-effort
+// contract as processRunNotifications: the marker advances even when delivery fails, so one broken
+// endpoint cannot cause a retry storm, at the cost of at-most-once delivery.
+func processChangeRequestNotifications(
+	ctx context.Context,
+	crRepo *repository.ChangeRequestRepository,
+	rbacSvc *rbac.Service,
+	userRepo *repository.UserRepository,
+	notifier *notification.Service,
+) {
+	crs, err := crRepo.ListNeedingNotification(50)
+	if err != nil {
+		logger.Warnf("notifications: list change requests needing notification: %v", err)
+		return
+	}
+	for i := range crs {
+		cr := &crs[i]
+		if cr.Workspace == nil {
+			logger.Warnf("notifications: change request %s has no workspace loaded; skipping", cr.ID)
+			continue
+		}
+
+		teams, terr := rbacSvc.ListTeamsWithWorkspaceAccess(
+			cr.Workspace.Project.OrganizationID, cr.Workspace.ProjectID, cr.WorkspaceID)
+		if terr != nil {
+			// Do NOT advance the marker: this is a lookup failure, not a delivery failure, so the
+			// request has not had its chance to notify yet and should be retried next tick.
+			logger.Warnf("notifications: resolve teams for change request %s: %v", cr.ID, terr)
+			continue
+		}
+
+		teamIDs := make([]uuid.UUID, 0, len(teams))
+		for _, t := range teams {
+			teamIDs = append(teamIDs, t.TeamID)
+		}
+
+		// TFE puts the filer's email in change_request_created_by.
+		createdBy := cr.CreatedBy.String()
+		if u, uerr := userRepo.GetByID(cr.CreatedBy); uerr == nil && u.Email != "" {
+			createdBy = u.Email
+		}
+
+		notifier.NotifyChangeRequest(ctx, notification.ChangeRequestContext{
+			ChangeRequestID: cr.ID,
+			Subject:         cr.Subject,
+			Message:         cr.Message,
+			CreatedBy:       createdBy,
+			CreatedAt:       cr.CreatedAt,
+			WorkspaceID:     cr.WorkspaceID,
+			WorkspaceName:   cr.Workspace.Name,
+			Organization:    cr.Workspace.Project.Organization.Name,
+		}, teamIDs)
+
+		if err := crRepo.MarkNotified(cr.ID); err != nil {
+			logger.Warnf("notifications: mark change request %s notified: %v", cr.ID, err)
 		}
 	}
 }
