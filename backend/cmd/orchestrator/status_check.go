@@ -237,7 +237,11 @@ func mapRunStatusToCheckState(run *models.Run) (vcs.StatusState, string, bool) {
 		return vcs.StatusStatePending, "Terraform plan is queued", true
 	case models.RunStatusPlanning:
 		return vcs.StatusStatePending, "Terraform plan is running", true
-	case models.RunStatusPlanned:
+	// Run-task stage statuses: PR checks stay pending while tasks execute; a speculative run's
+	// post-plan stage passing rests at post_plan_completed, which reports like planned.
+	case models.RunStatusPrePlanRunning, models.RunStatusPrePlanCompleted, models.RunStatusPostPlanRunning:
+		return vcs.StatusStatePending, "Terraform run tasks are running", true
+	case models.RunStatusPlanned, models.RunStatusPostPlanCompleted:
 		return vcs.StatusStateSuccess, buildPlannedDescription(run), true
 	case models.RunStatusFailed:
 		desc := "Terraform plan failed"
