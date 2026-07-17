@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	terraformHandlers "github.com/michielvha/stackweaver/backend/internal/api/v2/handlers/terraform"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/crypto"
 	"github.com/michielvha/stackweaver/core/models"
@@ -21,6 +22,7 @@ import (
 	"github.com/michielvha/stackweaver/core/repository"
 	"github.com/michielvha/stackweaver/core/services/encryptionkey"
 	"github.com/michielvha/stackweaver/core/services/notification"
+	"github.com/michielvha/stackweaver/core/services/runtask"
 	"github.com/michielvha/stackweaver/core/services/vcs"
 )
 
@@ -161,6 +163,29 @@ func main() {
 		repository.NewProjectRepository(db),
 	)
 
+	// Run-task stage driver (tfe_organization_run_task family): fires signed stage webhooks, sweeps
+	// timeouts, and continues gated runs. Uses the SAME encryptionkey-resolved crypto as the API
+	// (see the notification comment above — the fail-open VCS derivation must not sign webhooks),
+	// both for decrypting snapshot HMAC keys and for minting the callback access tokens.
+	terraformHandlers.SetTaskTokenSecret(encryptionkey.Resolve(os.Getenv("ENCRYPTION_KEY")))
+	taskStageRepo := repository.NewTaskStageRepository(db)
+	taskResultRepo := repository.NewTaskResultRepository(db)
+	taskProgress, taskCap := taskTimeouts()
+	taskDeps := &taskStageDeps{
+		runRepo:         runRepo,
+		stageRepo:       taskStageRepo,
+		resultRepo:      taskResultRepo,
+		configVerRepo:   configVersionRepo,
+		orgRepo:         repository.NewOrganizationRepository(db),
+		userRepo:        changeRequestUserRepo,
+		taskSvc:         runtask.NewService(notifCrypto),
+		engine:          runtask.NewEngine(runRepo, taskStageRepo),
+		appURL:          os.Getenv("STACKWEAVER_APP_URL"),
+		apiURL:          os.Getenv("STACKWEAVER_API_URL"),
+		progressTimeout: taskProgress,
+		maxDuration:     taskCap,
+	}
+
 	// Start orchestrator
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -271,6 +296,27 @@ func main() {
 		}
 	}()
 
+	// Drive run-task stages every 5 seconds: open pre_plan gates, fire freshly claimed stages'
+	// webhooks, finalize completed stages (callback backstop), and sweep timeouts. 5s (not 10s)
+	// because a stage boundary sits INSIDE the run's critical path — every tick of latency here is
+	// wall-clock added to every gated run.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		logger.Info("Orchestrator started - driving run-task stages")
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processTaskStages(ctx, taskDeps)
+			}
+		}
+	}()
+
 	// Fire run triggers (tfe_run_trigger) every 10 seconds: when a run applies, queue a run in each
 	// downstream target workspace. Runs in the orchestrator so it is independent of which runner
 	// (remote or agent) applied the source run.
@@ -319,15 +365,24 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 		return fmt.Errorf("failed to list pending runs: %w", err)
 	}
 
+	// Runs whose pre_plan task stage passed are dispatchable exactly like pending. (Pending runs
+	// with an UNPASSED pre_plan stage may appear in the list above, but ClaimForDispatch refuses
+	// them — the gate lives in the claim, shared with the agent job-start path.)
+	gatePassedRuns, err := runRepo.ListByStatus(models.RunStatusPrePlanCompleted, 10)
+	if err != nil {
+		return fmt.Errorf("failed to list pre_plan_completed runs: %w", err)
+	}
+
 	// Also get runs in "applying" status (plan-and-apply runs ready for apply phase)
 	applyingRuns, err := runRepo.ListByStatus(models.RunStatusApplying, 10)
 	if err != nil {
 		return fmt.Errorf("failed to list applying runs: %w", err)
 	}
 
-	// Combine both lists
-	runs := make([]models.Run, 0, len(pendingRuns)+len(applyingRuns))
+	// Combine the lists
+	runs := make([]models.Run, 0, len(pendingRuns)+len(gatePassedRuns)+len(applyingRuns))
 	runs = append(runs, pendingRuns...)
+	runs = append(runs, gatePassedRuns...)
 	runs = append(runs, applyingRuns...)
 
 	for _, run := range runs {
@@ -359,9 +414,11 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 			continue
 		}
 
-		// Skip if run is no longer pending or applying (might have been cancelled, failed, or started)
-		// "applying" status means plan-and-apply run is ready for apply phase
-		if reloadedRun.Status != models.RunStatusPending && reloadedRun.Status != models.RunStatusApplying {
+		// Skip if run is no longer dispatchable (might have been cancelled, failed, or started).
+		// "applying" status means plan-and-apply run is ready for apply phase;
+		// "pre_plan_completed" means its pre_plan task stage passed and the plan can dispatch.
+		if reloadedRun.Status != models.RunStatusPending && reloadedRun.Status != models.RunStatusApplying &&
+			reloadedRun.Status != models.RunStatusPrePlanCompleted {
 			logger.Infof("Skipping enqueue for run %s - status changed to %s", reloadedRun.ID, reloadedRun.Status)
 			continue
 		}
