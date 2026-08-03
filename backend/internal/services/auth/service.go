@@ -1,0 +1,504 @@
+// Copyright (c) 2025 VH & Co BV. Licensed under the Business Source License 1.1. See LICENSE for details.
+
+package auth
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/core/models"
+	"github.com/michielvha/stackweaver/core/repository"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
+)
+
+// shortTokenID returns a 16-hex-char SHA-256 prefix of the token, suitable
+// for opaque correlation in debug logs without revealing token bytes.
+// Round 25 hardening (item 16): the previous implementation logged the
+// first 10 raw chars of the token at Debug, leaking enough entropy to
+// be useful in a log-correlation attack on TFE-style tokens. SHA-256 is
+// one-way; the hex prefix is enough to match an audit-log record back to
+// a Debug breadcrumb but cannot be back-walked to the source token.
+func shortTokenID(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// APIKeyVerifier interface for API key verification
+type APIKeyVerifier interface {
+	VerifyAPIKey(key string) (*models.APIKey, error)
+	UpdateLastUsed(id uuid.UUID) error
+}
+
+// TeamSyncer interface for automatic team assignment based on SSO group claims
+type TeamSyncer interface {
+	IsEnabled() bool
+	SyncUserTeams(ctx context.Context, userID uuid.UUID, ssoGroups []string) error
+}
+
+// UserLookup is the subset of `repository.UserRepository` the auth
+// service depends on. Defined as an interface so unit tests can pass
+// a mock without a live database. The concrete repo satisfies it
+// implicitly.
+type UserLookup interface {
+	GetByID(id uuid.UUID) (*models.User, error)
+	GetOrCreateByZitadelSubject(subject, email, name string) (*models.User, error)
+}
+
+type Service struct {
+	userRepo      UserLookup
+	apiKeyService APIKeyVerifier
+	teamSyncer    TeamSyncer
+	verifier      *ZitadelVerifier
+	issuer        string
+	clientID      string
+}
+
+// NewService constructs the auth service with the production repos.
+// The signature accepts the concrete `*repository.UserRepository` so
+// production callers stay simple — Go's structural typing means the
+// concrete repo satisfies the `UserLookup` interface automatically.
+func NewService(userRepo *repository.UserRepository) *Service {
+	return &Service{
+		userRepo: userRepo,
+	}
+}
+
+// NewServiceWithLookups is the test-friendly constructor — accepts
+// the lookup interface directly so unit tests can pass a mock
+// without depending on the concrete repo type or a live database.
+// Production callers should keep using `NewService`.
+func NewServiceWithLookups(userRepo UserLookup) *Service {
+	return &Service{
+		userRepo: userRepo,
+	}
+}
+
+// SetAPIKeyService sets the API key service for authentication
+func (s *Service) SetAPIKeyService(apiKeyService APIKeyVerifier) {
+	s.apiKeyService = apiKeyService
+}
+
+// SetTeamSyncer sets the team sync service for automatic SSO team assignment
+func (s *Service) SetTeamSyncer(syncer TeamSyncer) {
+	s.teamSyncer = syncer
+}
+
+// InitializeZitadel initializes the Zitadel verifier with configuration.
+// internalAddr (e.g. "localhost:8080") is used to fetch JWKS keys internally
+// when the issuer is an external domain, avoiding public internet round-trips.
+func (s *Service) InitializeZitadel(issuer, clientID, clientSecret, internalAddr string) error {
+	verifier, err := NewZitadelVerifier(issuer, clientID, clientSecret, internalAddr)
+	if err != nil {
+		return fmt.Errorf("failed to create Zitadel verifier: %w", err)
+	}
+	s.verifier = verifier
+	s.issuer = issuer
+	s.clientID = clientID
+	return nil
+}
+
+// RegisterAudience adds a client_id the Zitadel verifier will accept in an access token's
+// `aud` (AUD-012). Register both the API and the frontend PKCE client so real user tokens
+// (issued to the frontend client) are accepted while tokens for other clients are rejected.
+func (s *Service) RegisterAudience(clientID string) {
+	if s.verifier != nil {
+		s.verifier.AcceptAudience(clientID)
+	}
+}
+
+func (s *Service) GetUserFromContext(c *gin.Context) (*models.User, error) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		return nil, errors.New("user not authenticated")
+	}
+
+	id, ok := userID.(uuid.UUID)
+	if !ok {
+		return nil, errors.New("invalid user ID in context")
+	}
+
+	user, err := s.userRepo.GetByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	return user, nil
+}
+
+// GetUserFromToken authenticates a token and returns the user
+// Supports programmatic tokens (tfe- prefix, both org-bound and
+// user-bound api_keys) and JWT tokens (Zitadel).
+func (s *Service) GetUserFromToken(tokenString string) (*models.User, error) {
+	// Programmatic tokens carry the "tfe-" prefix (Terraform Cloud
+	// compatible). Both org-bound and user-bound tokens are api_keys,
+	// so a single api-key lookup resolves them.
+	if strings.HasPrefix(tokenString, "tfe-") {
+		if s.apiKeyService != nil {
+			apiKey, err := s.apiKeyService.VerifyAPIKey(tokenString)
+			if err == nil && apiKey != nil {
+				// Update last used timestamp
+				_ = s.apiKeyService.UpdateLastUsed(apiKey.ID)
+
+				// Get user
+				user, err := s.userRepo.GetByID(apiKey.UserID)
+				if err == nil {
+					return user, nil
+				}
+			}
+		}
+		// The "tfe-" prefix is authoritative (#503): an API token is never
+		// a JWT, so a lookup miss is terminal. Falling through to JWT
+		// verification surfaced revoked/unknown keys as "token is not a
+		// JWT (got opaque token)" — misdirecting operators toward Zitadel
+		// configuration instead of the token's lifecycle.
+		return nil, errors.New("invalid or revoked API token")
+	}
+
+	// Try JWT token (Zitadel)
+	if s.verifier == nil {
+		return nil, errors.New("authentication service not initialized")
+	}
+
+	// Verify JWT token (need context for verification)
+	ctx := context.Background()
+	claims, claimsMap, err := s.verifier.VerifyToken(ctx, tokenString)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token: %w", err)
+	}
+
+	// Extract user info from claims (using raw claims map for custom Zitadel fields)
+	// If email is missing, fallback to UserInfo endpoint (standard OIDC)
+	userInfo := ExtractUserInfo(ctx, claims, claimsMap, s.issuer, tokenString, s.verifier.httpClient, s.verifier.internalAddr, s.verifier.hostOverride)
+
+	// Get or create user in database by Zitadel subject
+	user, err := s.userRepo.GetOrCreateByZitadelSubject(
+		userInfo.Subject,
+		userInfo.Email,
+		userInfo.Name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or create user: %w", err)
+	}
+
+	return user, nil
+}
+
+func (s *Service) AuthenticateMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Skip authentication for OPTIONS requests (CORS preflight)
+		if c.Request.Method == "OPTIONS" {
+			c.Next()
+			return
+		}
+
+		// TFE-compatible: For logs endpoint, allow token in query parameter OR Authorization header
+		// According to TFE docs, all endpoints use Authorization header, but Terraform CLI may call
+		// log-read-url without header if token is in URL. Support both methods for compatibility.
+		if strings.HasPrefix(c.Request.URL.Path, "/api/v2/runs/") && strings.HasSuffix(c.Request.URL.Path, "/logs") {
+			// Try token in query parameter first (for log-read-url with embedded token)
+			tokenFromQuery := c.Query("token")
+			if tokenFromQuery != "" {
+				// Authenticate using token from query parameter
+				user, err := s.GetUserFromToken(tokenFromQuery)
+				if err == nil {
+					c.Set("user_id", user.ID)
+					c.Set("user_email", user.Email)
+					c.Set("user_name", user.Name)
+					c.Set("auth_method", "query_token")
+					c.Next()
+					return
+				}
+			}
+			// TFE-compatible: If no token in query and no Authorization header, allow the request to proceed
+			// The logs handler will validate the run exists (security check)
+			// Terraform CLI calls log-read-url without auth, relying on the URL being pre-authenticated
+			// Since we can't pre-authenticate the URL, we allow the request and validate in the handler
+			authHeader := c.GetHeader("Authorization")
+			if authHeader == "" {
+				// No auth provided - allow request to proceed to handler for validation
+				// The handler will check if the run exists and return appropriate response
+				c.Next()
+				return
+			}
+			// If Authorization header is present, continue with normal auth flow below
+		}
+
+		// Extract token from Authorization header (standard TFE authentication)
+		authHeader := c.GetHeader("Authorization")
+		logger.Debugf("auth: authorization header present: %v", authHeader != "")
+		if authHeader == "" {
+			logger.Debugf("auth: missing authorization header for path: %s", c.Request.URL.Path)
+			c.JSON(401, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "401",
+						"title":  "Unauthorized",
+						"detail": "missing authorization header",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		// Check for Bearer token
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.JSON(401, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "401",
+						"title":  "Unauthorized",
+						"detail": "invalid authorization header format",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		tokenString := parts[1]
+
+		// Debug logging for authentication attempts.
+		// Round 25 hardening (item 16): never log raw token bytes — even
+		// the first 10 characters of a TFE-style API token (`tfe-…`)
+		// carry enough entropy to be useful in a log-correlation attack
+		// if Debug is ever enabled in production. Log a SHA-256-truncated
+		// token-id instead, which is opaque but stable enough to match
+		// against an audit log.
+		logger.Debugf("auth: received token (id: %s)", shortTokenID(tokenString))
+		logger.Debugf("auth: request path: %s", c.Request.URL.Path)
+		logger.Debugf("auth: request method: %s", c.Request.Method)
+
+		// Programmatic tokens carry the "tfe-" prefix (Terraform Cloud
+		// compatible). Both org-bound and user-bound tokens are api_keys,
+		// so a single api-key lookup resolves them.
+		if strings.HasPrefix(tokenString, "tfe-") {
+			logger.Debug("auth: token starts with 'tfe-', attempting api-key lookup")
+			if s.apiKeyService != nil {
+				apiKey, err := s.apiKeyService.VerifyAPIKey(tokenString)
+				if err == nil && apiKey != nil {
+					// Update last used timestamp
+					_ = s.apiKeyService.UpdateLastUsed(apiKey.ID)
+
+					// Get user
+					user, err := s.userRepo.GetByID(apiKey.UserID)
+					if err == nil {
+						// Store user in context
+						c.Set("user_id", user.ID)
+						c.Set("user_email", user.Email)
+						c.Set("user_name", user.Name)
+						c.Set("auth_method", "api_key")
+						// Store API key details for runner registration and scope checks
+						c.Set("api_key_id", apiKey.ID)
+						c.Set("api_key_scopes", []string(apiKey.Scopes))
+						c.Set("api_key", apiKey)
+						// Org-resolution wall inputs (Phase 2): the token's
+						// kind drives how the target org is authorized. An
+						// org-bound token also carries its bound org id; a
+						// user-bound token carries none (authorized by the
+						// user's memberships at the wall instead).
+						c.Set("token_kind", apiKey.Kind)
+						if apiKey.OrganizationID != nil {
+							c.Set("token_org_id", *apiKey.OrganizationID)
+						}
+						c.Next()
+						return
+					}
+				} else if err != nil {
+					logger.Debugf("auth: api-key lookup failed: %v", err)
+				}
+			}
+			// The "tfe-" prefix is authoritative (#503): an API token is
+			// never a JWT, so a lookup miss is terminal. Falling through
+			// to JWT verification surfaced revoked/unknown keys as "token
+			// is not a JWT (got opaque token)" — misdirecting operators
+			// toward Zitadel configuration instead of the token's
+			// lifecycle.
+			logger.Warnf("auth: api token rejected: unknown or revoked (id: %s)", shortTokenID(tokenString))
+			c.JSON(401, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "401",
+						"title":  "Unauthorized",
+						"detail": "invalid or revoked API token",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+		logger.Debug("auth: token does not start with 'tfe-', attempting JWT verification")
+
+		// Try JWT token (Zitadel)
+		if s.verifier == nil {
+			c.JSON(500, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "500",
+						"title":  "Internal Server Error",
+						"detail": "authentication service not initialized",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		// Verify JWT token
+		claims, claimsMap, err := s.verifier.VerifyToken(c.Request.Context(), tokenString)
+		if err != nil {
+			// Log the actual error for debugging (but don't expose it to client for security)
+			logger.Warnf("auth: token verification failed: %v", err)
+			c.JSON(401, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "401",
+						"title":  "Unauthorized",
+						"detail": "invalid token",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		// Extract user info from claims (using raw claims map for custom Zitadel fields)
+		// If email is missing, fallback to UserInfo endpoint (standard OIDC)
+		userInfo := ExtractUserInfo(c.Request.Context(), claims, claimsMap, s.issuer, tokenString, s.verifier.httpClient, s.verifier.internalAddr, s.verifier.hostOverride)
+
+		logger.Infof("Auth: Subject=%s Email=%s Groups=%v", userInfo.Subject, userInfo.Email, userInfo.Groups)
+
+		// Get or create user in database by Zitadel subject
+		// This ensures users are automatically created on first authentication
+		user, err := s.userRepo.GetOrCreateByZitadelSubject(
+			userInfo.Subject,
+			userInfo.Email,
+			userInfo.Name,
+		)
+		if err != nil {
+			c.JSON(500, gin.H{
+				"errors": []gin.H{
+					{
+						"status": "500",
+						"title":  "Internal Server Error",
+						"detail": "failed to get or create user",
+					},
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		// Store local user UUID in context (not Zitadel subject)
+		c.Set("user_id", user.ID)
+		c.Set("user_email", user.Email)
+		c.Set("user_name", user.Name)
+		c.Set("user_subject", userInfo.Subject)
+		c.Set("token_claims", claims)
+		c.Set("auth_method", "jwt")
+
+		// Store SSO groups in context for downstream team sync
+		if len(userInfo.Groups) > 0 {
+			c.Set("sso_groups", userInfo.Groups)
+
+			// Trigger automatic team sync based on SSO group claims
+			if s.teamSyncer != nil && s.teamSyncer.IsEnabled() {
+				if err := s.teamSyncer.SyncUserTeams(c.Request.Context(), user.ID, userInfo.Groups); err != nil {
+					logger.Errorf("TeamSync failed for user %s: %v", user.ID, err)
+					// Don't block authentication on team sync failure
+				}
+			}
+		}
+
+		// Continue to next handler
+		c.Next()
+	}
+}
+
+func (s *Service) GetUserID(ctx context.Context) (uuid.UUID, error) {
+	// Try to get from gin context if available
+	if c, ok := ctx.(*gin.Context); ok {
+		userID, exists := c.Get("user_id")
+		if exists {
+			if idStr, ok := userID.(string); ok {
+				// Try to parse as UUID
+				if id, err := uuid.Parse(idStr); err == nil {
+					return id, nil
+				}
+				// If not a UUID, return error
+				return uuid.Nil, fmt.Errorf("user_id is not a valid UUID: %s", idStr)
+			}
+		}
+	}
+	return uuid.Nil, errors.New("user not authenticated")
+}
+
+// GetUserSubject returns the Zitadel subject (user ID) from context
+func (s *Service) GetUserSubject(c *gin.Context) (string, error) {
+	subject, exists := c.Get("user_subject")
+	if !exists {
+		return "", errors.New("user not authenticated")
+	}
+	subjectStr, ok := subject.(string)
+	if !ok {
+		return "", errors.New("invalid subject type")
+	}
+	return subjectStr, nil
+}
+
+// GetTokenClaims returns the token claims from context
+func (s *Service) GetTokenClaims(c *gin.Context) (*oidc.AccessTokenClaims, error) {
+	claims, exists := c.Get("token_claims")
+	if !exists {
+		return nil, errors.New("token claims not found")
+	}
+	tokenClaims, ok := claims.(*oidc.AccessTokenClaims)
+	if !ok {
+		return nil, errors.New("invalid token claims type")
+	}
+	return tokenClaims, nil
+}
+
+// FetchUserInfoPicture calls the OIDC UserInfo endpoint and returns the picture URL.
+// Returns empty string if the user has no avatar or the call fails.
+// Only works for JWT auth (requires a valid access token).
+func (s *Service) FetchUserInfoPicture(ctx context.Context, c *gin.Context) string {
+	// Only fetch for JWT auth — API key / TFE token don't work with Zitadel UserInfo
+	authMethod, _ := c.Get("auth_method")
+	if authMethod != "jwt" {
+		return ""
+	}
+
+	// Extract Bearer token from Authorization header
+	authHeader := c.GetHeader("Authorization")
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return ""
+	}
+	tokenString := parts[1]
+
+	if s.verifier == nil || s.issuer == "" {
+		return ""
+	}
+
+	userInfoData := fetchUserInfoFromEndpoint(ctx, s.issuer, tokenString, s.verifier.httpClient, s.verifier.internalAddr, s.verifier.hostOverride)
+	if userInfoData == nil {
+		return ""
+	}
+
+	if picture, ok := userInfoData["picture"].(string); ok {
+		return picture
+	}
+	return ""
+}
