@@ -7,7 +7,7 @@ import (
 )
 
 // FuzzExtractPRNumber asserts extractPRNumber never panics on arbitrary
-// committer strings (which come from upstream VCS webhook payloads — untrusted).
+// committer strings (which come from upstream VCS webhook payloads - untrusted).
 func FuzzExtractPRNumber(f *testing.F) {
 	f.Add("")
 	f.Add("user:42")

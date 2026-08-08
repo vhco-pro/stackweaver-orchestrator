@@ -122,9 +122,9 @@ func main() {
 	}
 
 	// Resolve the encryption-at-rest key so the registry can decrypt VCS connection
-	// tokens at rest (#95) and re-encrypt refreshed tokens. Unlike the api/runner —
+	// tokens at rest (#95) and re-encrypt refreshed tokens. Unlike the api/runner -
 	// which require the key for variables/state/credentials and so fail loud (AUD-013)
-	// — the orchestrator only needs it for the optional VCS path, so resolution here is
+	// - the orchestrator only needs it for the optional VCS path, so resolution here is
 	// best-effort: a missing/invalid key logs a warning and leaves crypto nil (tokens
 	// treated as plaintext, exactly as before #95), never crashing the scheduler.
 	var atRestCrypto *crypto.CryptoService
@@ -165,7 +165,7 @@ func main() {
 
 	// Run-task stage driver (tfe_organization_run_task family): fires signed stage webhooks, sweeps
 	// timeouts, and continues gated runs. Uses the SAME encryptionkey-resolved crypto as the API
-	// (see the notification comment above — the fail-open VCS derivation must not sign webhooks),
+	// (see the notification comment above - the fail-open VCS derivation must not sign webhooks),
 	// both for decrypting snapshot HMAC keys and for minting the callback access tokens.
 	terraformHandlers.SetTaskTokenSecret(encryptionkey.Resolve(os.Getenv("ENCRYPTION_KEY")))
 	taskStageRepo := repository.NewTaskStageRepository(db)
@@ -298,7 +298,7 @@ func main() {
 
 	// Drive run-task stages every 5 seconds: open pre_plan gates, fire freshly claimed stages'
 	// webhooks, finalize completed stages (callback backstop), and sweep timeouts. 5s (not 10s)
-	// because a stage boundary sits INSIDE the run's critical path — every tick of latency here is
+	// because a stage boundary sits INSIDE the run's critical path - every tick of latency here is
 	// wall-clock added to every gated run.
 	wg.Add(1)
 	go func() {
@@ -344,7 +344,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	// AUD-132: graceful shutdown — cancel the context and wait (bounded) for the workers to
+	// AUD-132: graceful shutdown - cancel the context and wait (bounded) for the workers to
 	// finish their current iteration so we don't abandon in-flight DB writes.
 	logger.Info("Shutting down orchestrator...")
 	cancel()
@@ -367,7 +367,7 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 
 	// Runs whose pre_plan task stage passed are dispatchable exactly like pending. (Pending runs
 	// with an UNPASSED pre_plan stage may appear in the list above, but ClaimForDispatch refuses
-	// them — the gate lives in the claim, shared with the agent job-start path.)
+	// them - the gate lives in the claim, shared with the agent job-start path.)
 	gatePassedRuns, err := runRepo.ListByStatus(models.RunStatusPrePlanCompleted, 10)
 	if err != nil {
 		return fmt.Errorf("failed to list pre_plan_completed runs: %w", err)
@@ -386,7 +386,7 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 	runs = append(runs, applyingRuns...)
 
 	for _, run := range runs {
-		// Skip runs that are too old — abandoned ones are handled by cleanupStuckRuns. AUD-110:
+		// Skip runs that are too old - abandoned ones are handled by cleanupStuckRuns. AUD-110:
 		// the age must be measured from the CURRENT phase's start, not from run creation. A
 		// plan-and-apply run that a human reviews for 30+ minutes before clicking "Confirm & Apply"
 		// has an old CreatedAt but a freshly-confirmed apply; keying the skip on CreatedAt wedged
@@ -463,7 +463,7 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 		}
 
 		// AUD-007/112: atomically claim the run for dispatch BEFORE enqueueing. The claim succeeds
-		// for exactly one caller, so this run is enqueued to Redis at most once — no more
+		// for exactly one caller, so this run is enqueued to Redis at most once - no more
 		// re-enqueueing the same run every 5s tick while a runner is busy (duplicate plans), and no
 		// second concurrent apply of an `applying` run. A run whose claim we don't win (already
 		// dispatched, or its status changed) is simply skipped this tick.
@@ -694,7 +694,7 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 			errorMessage = fmt.Sprintf("Run exceeded timeout of %d seconds and was automatically cancelled", timeout)
 		}
 
-		// MarkAsFailed is guarded (AUD-132) — it no-ops if the run already reached a terminal
+		// MarkAsFailed is guarded (AUD-132) - it no-ops if the run already reached a terminal
 		// state between the sweep query and now, so it cannot ping-pong a finished run to failed.
 		if err := runRepo.MarkAsFailed(run.ID, errorMessage); err != nil {
 			logger.Errorf("Failed to mark run %s as failed: %v", run.ID, err)
@@ -708,7 +708,7 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 }
 
 // reclaimOrphanedQueueMessages requeues in-flight queue messages whose consumer died permanently
-// and never restarted to recover its own processing list (AUD-015 — the multi-replica case). The
+// and never restarted to recover its own processing list (AUD-015 - the multi-replica case). The
 // 6h threshold is well beyond any legitimate run/job processing time (terraform run timeout defaults
 // to 2h and the stuck-run/job reapers fail anything past its timeout), so a healthy long-running job
 // is never reclaimed; the AUD-006 state lock is the final backstop against a reclaimed duplicate.
@@ -724,7 +724,7 @@ func reclaimOrphanedQueueMessages(ctx context.Context, redisQueue *queue.RedisQu
 }
 
 // cleanupStuckAnsibleJobs recovers Ansible jobs whose executor died mid-run, leaving them stuck
-// in `running` forever (AUD-016 — Ansible previously had no stuck-job recovery at all). Uses a
+// in `running` forever (AUD-016 - Ansible previously had no stuck-job recovery at all). Uses a
 // 1-hour default timeout when a job carries no explicit TimeoutSeconds.
 func cleanupStuckAnsibleJobs(ctx context.Context, jobRepo *repository.AnsibleJobRepository) error {
 	stuckJobs, err := jobRepo.FindStuckJobs(time.Hour)
