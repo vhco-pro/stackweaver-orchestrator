@@ -31,7 +31,7 @@ func updatePRStatusCheck(
 ) {
 	// Determine the target status check state first, and skip entirely if it has not changed
 	// since we last posted it (AUD-111). Without this the orchestrator re-POSTed the same commit
-	// status every 10s forever — GitHub creates a new status object per POST and hard-caps 1000
+	// status every 10s forever - GitHub creates a new status object per POST and hard-caps 1000
 	// per SHA. Doing the check up front also stops the per-run log spam and DB lookups for the
 	// (overwhelmingly common) unchanged case (part of AUD-132).
 	state, description, ok := mapRunStatusToCheckState(run)

@@ -21,7 +21,7 @@ import (
 // tokens and JWT identities.
 //
 // The interface is intentionally one-method-per-resource so it can be faked
-// in unit tests without a database — see org_wall_test.go.
+// in unit tests without a database - see org_wall_test.go.
 type OrgResolver interface {
 	ByOrgName(name string) (uuid.UUID, error)
 	ByOrgMembershipID(id string) (uuid.UUID, error)
@@ -63,6 +63,10 @@ type OrgResolver interface {
 	ByAnsibleWorkflowID(id string) (uuid.UUID, error)
 	ByAnsibleWorkflowNodeID(id string) (uuid.UUID, error)
 	ByAnsibleWorkflowEdgeID(id string) (uuid.UUID, error)
+	ByAnsibleInventorySyncID(id string) (uuid.UUID, error)
+	ByAnsibleNotificationTemplateID(id string) (uuid.UUID, error)
+	ByAnsibleWorkflowJobID(id string) (uuid.UUID, error)
+	ByAnsibleWorkflowNodeJobID(id string) (uuid.UUID, error)
 
 	// UserInOrg reports whether the user is a member of the org (directly
 	// or via a team). It is the membership boundary user-bound tokens and
@@ -101,7 +105,7 @@ type routeEntry struct {
 // Routes are matched against a fail-closed registry: any api-key request to
 // a route that is not classified is denied, so a newly added route cannot
 // silently bypass the wall. JWT / session identities (no token_kind in
-// context) pass straight through — the wall never widens or narrows their
+// context) pass straight through - the wall never widens or narrows their
 // access; existing per-handler authorization continues to apply to them.
 func OrgResolutionWall(resolver OrgResolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
