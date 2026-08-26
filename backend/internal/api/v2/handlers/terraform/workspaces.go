@@ -176,8 +176,8 @@ type CreateWorkspaceRequestV2 struct {
 			QueueAllRuns               *bool           `json:"queue-all-runs,omitempty"`
 			SpeculativeEnabled         *bool           `json:"speculative-enabled,omitempty"`
 			FileTriggersEnabled        *bool           `json:"file-triggers-enabled,omitempty"`
-			TriggerPrefixes            []string        `json:"trigger-prefixes,omitempty"`
-			TriggerPatterns            []string        `json:"trigger-patterns,omitempty"`
+			TriggerPrefixes            *[]string       `json:"trigger-prefixes,omitempty"`
+			TriggerPatterns            *[]string       `json:"trigger-patterns,omitempty"`
 			GlobalRemoteState          *bool           `json:"global-remote-state,omitempty"`
 			StructuredRunOutputEnabled *bool           `json:"structured-run-output-enabled,omitempty"`
 			AssessmentsEnabled         *bool           `json:"assessments-enabled,omitempty"`
@@ -302,8 +302,8 @@ type UpdateWorkspaceRequestV2 struct {
 			QueueAllRuns               *bool           `json:"queue-all-runs,omitempty"`
 			SpeculativeEnabled         *bool           `json:"speculative-enabled,omitempty"`
 			FileTriggersEnabled        *bool           `json:"file-triggers-enabled,omitempty"`
-			TriggerPrefixes            []string        `json:"trigger-prefixes,omitempty"`
-			TriggerPatterns            []string        `json:"trigger-patterns,omitempty"`
+			TriggerPrefixes            *[]string       `json:"trigger-prefixes,omitempty"`
+			TriggerPatterns            *[]string       `json:"trigger-patterns,omitempty"`
 			GlobalRemoteState          *bool           `json:"global-remote-state,omitempty"`
 			StructuredRunOutputEnabled *bool           `json:"structured-run-output-enabled,omitempty"`
 			AssessmentsEnabled         *bool           `json:"assessments-enabled,omitempty"`
@@ -320,6 +320,75 @@ type UpdateWorkspaceRequestV2 struct {
 // wsTagsPresent reports whether an update request manages tag bindings.
 func (r *UpdateWorkspaceRequestV2) wsTagsPresent() bool {
 	return r.Data.Relationships != nil && r.Data.Relationships.TagBindings != nil
+}
+
+// --- trigger-prefixes / trigger-patterns -----------------------------------------------------------
+//
+// Both columns drive VCS path filtering (see backend/internal/api/v2/handlers/vcs_path_filtering.go),
+// so they are pointers: an omitted attribute leaves the stored list alone, while an explicit empty
+// array clears it. Without that distinction a workspace could never stop monitoring a path list.
+
+// triggerListsConflict reports whether a single request populates both trigger lists. TFE treats
+// them as mutually exclusive and so does the provider schema, so this is rejected with a 422 rather
+// than resolved by precedence.
+func triggerListsConflict(prefixes, patterns *[]string) bool {
+	return prefixes != nil && patterns != nil && len(*prefixes) > 0 && len(*patterns) > 0
+}
+
+// applyTriggerLists writes the trigger columns from a request. Populating one list clears the other,
+// so the stored state can never hold both and leave the filtering precedence observable. changes may
+// be nil for callers that do not record an activity diff.
+func applyTriggerLists(workspace *models.Workspace, prefixes, patterns *[]string, changes map[string]interface{}) {
+	record := func(key string, value interface{}) {
+		if changes != nil {
+			changes[key] = value
+		}
+	}
+
+	if prefixes != nil {
+		encoded := ""
+		if len(*prefixes) > 0 {
+			if data, err := json.Marshal(*prefixes); err == nil {
+				encoded = string(data)
+			}
+		}
+		if workspace.TriggerPrefixes != encoded {
+			workspace.TriggerPrefixes = encoded
+			record("trigger_prefixes", *prefixes)
+		}
+		if encoded != "" && workspace.TriggerPatterns != "" {
+			workspace.TriggerPatterns = ""
+			record("trigger_patterns", []string{})
+		}
+	}
+
+	if patterns != nil {
+		encoded := ""
+		if len(*patterns) > 0 {
+			if data, err := json.Marshal(*patterns); err == nil {
+				encoded = string(data)
+			}
+		}
+		if workspace.TriggerPatterns != encoded {
+			workspace.TriggerPatterns = encoded
+			record("trigger_patterns", *patterns)
+		}
+		if encoded != "" && workspace.TriggerPrefixes != "" {
+			workspace.TriggerPrefixes = ""
+			record("trigger_prefixes", []string{})
+		}
+	}
+}
+
+// triggerListConflictResponse writes the 422 both-lists-set error.
+func triggerListConflictResponse(c *gin.Context) {
+	c.JSON(http.StatusUnprocessableEntity, gin.H{
+		"errors": []gin.H{{
+			"status": "422",
+			"title":  "Invalid Attribute",
+			"detail": "trigger-patterns and trigger-prefixes are mutually exclusive; set only one",
+		}},
+	})
 }
 
 // --- Workspace list tag filtering (data.tfe_workspace_ids compatibility) ---------------------------
@@ -1384,16 +1453,11 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	}
 
 	// Handle trigger-prefixes / trigger-patterns (stored as JSON arrays)
-	if len(attrs.TriggerPrefixes) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPrefixes); err == nil {
-			workspace.TriggerPrefixes = string(data)
-		}
+	if triggerListsConflict(attrs.TriggerPrefixes, attrs.TriggerPatterns) {
+		triggerListConflictResponse(c)
+		return
 	}
-	if len(attrs.TriggerPatterns) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPatterns); err == nil {
-			workspace.TriggerPatterns = string(data)
-		}
-	}
+	applyTriggerLists(workspace, attrs.TriggerPrefixes, attrs.TriggerPatterns, nil)
 	if len(attrs.TagNames) > 0 {
 		if data, err := json.Marshal(attrs.TagNames); err == nil {
 			workspace.TagNames = string(data)
@@ -1434,6 +1498,16 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 			},
 		})
 		return
+	}
+
+	// GORM leaves zero-valued fields that carry a `default` tag out of the INSERT, so a
+	// workspace created with file-triggers-enabled=false would come back as true (the
+	// column is `default:true`). Now that the flag actually drives path filtering, write
+	// the false back explicitly instead of silently ignoring it (#678).
+	if !workspace.FileTriggersEnabled {
+		if err := h.workspaceRepo.Update(workspace); err != nil {
+			logger.Warnf("Failed to persist file-triggers-enabled=false for workspace %s: %v", workspace.ID, err)
+		}
 	}
 
 	// TFE tag bindings: apply the workspace's `tags` (sent as a tag-bindings relation, values in
@@ -1865,21 +1939,12 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 		workspace.ForceDelete = *attrs.ForceDelete
 	}
 
-	// Update trigger-prefixes
-	if len(attrs.TriggerPrefixes) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPrefixes); err == nil {
-			workspace.TriggerPrefixes = string(data)
-			changes["trigger_prefixes"] = attrs.TriggerPrefixes
-		}
+	// Update trigger-prefixes / trigger-patterns
+	if triggerListsConflict(attrs.TriggerPrefixes, attrs.TriggerPatterns) {
+		triggerListConflictResponse(c)
+		return
 	}
-
-	// Update trigger-patterns
-	if len(attrs.TriggerPatterns) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPatterns); err == nil {
-			workspace.TriggerPatterns = string(data)
-			changes["trigger_patterns"] = attrs.TriggerPatterns
-		}
-	}
+	applyTriggerLists(workspace, attrs.TriggerPrefixes, attrs.TriggerPatterns, changes)
 
 	// Update tag-names
 	if len(attrs.TagNames) > 0 {
@@ -2022,6 +2087,13 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 	// Check if workspace has active infrastructure (applied runs but no successful destroy)
 	// Skip this check if ?force=true query param OR workspace.ForceDelete attribute is set (TFE force_delete)
 	forceDelete := c.Query("force") == "true" || workspace.ForceDelete
+	if forceDelete && !org.AllowForceDeleteWorkspaces {
+		// tfe_organization allow_force_delete_workspaces: with the org on the TFE default (false),
+		// force-deleting a workspace with resources under management is owner-tier only.
+		if !h.authorizeForceDelete(c, user.ID, org.ID, workspace.ID) {
+			return
+		}
+	}
 	if !forceDelete {
 		hasActiveInfrastructure, err := h.workspaceRepo.HasActiveInfrastructure(workspace.ID)
 		if err != nil {
@@ -2175,6 +2247,23 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 		return
 	}
 
+	// tfe_organization allow_force_delete_workspaces: DELETE /workspaces/:id IS TFE's force
+	// delete. With the org on the TFE default (false), force-deleting a workspace with resources
+	// under management is owner-tier only.
+	org := workspace.Project.Organization
+	if !org.AllowForceDeleteWorkspaces {
+		user, uerr := h.authService.GetUserFromContext(c)
+		if uerr != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
+			})
+			return
+		}
+		if !h.authorizeForceDelete(c, user.ID, org.ID, workspace.ID) {
+			return
+		}
+	}
+
 	// Force delete by ID (TFE behavior: DELETE /workspaces/:id is force delete)
 	if err := h.workspaceRepo.Delete(workspace.ID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -2184,6 +2273,41 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// authorizeForceDelete enforces the tfe_organization allow_force_delete_workspaces policy for a
+// force deletion: when the workspace has resources under management, the caller must hold
+// owner tier (manage-membership). Writes the error response and returns false on denial; a
+// workspace with nothing under management passes (force degrades to a plain delete there).
+func (h *WorkspaceHandlerV2) authorizeForceDelete(c *gin.Context, userID, orgID uuid.UUID, workspaceID string) bool {
+	hasActive, err := h.workspaceRepo.HasActiveInfrastructure(workspaceID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check workspace runs"}},
+		})
+		return false
+	}
+	if !hasActive {
+		return true
+	}
+	isOwner, err := h.rbacService.CheckOrgManageMembership(c.Request.Context(), userID, orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}},
+		})
+		return false
+	}
+	if !isOwner {
+		c.JSON(http.StatusForbidden, gin.H{
+			"errors": []gin.H{{
+				"status": "403",
+				"title":  "Forbidden",
+				"detail": "Force-deleting a workspace with resources under management requires organization owner permissions, or enable allow-force-delete-workspaces on the organization",
+			}},
+		})
+		return false
+	}
+	return true
 }
 
 // SafeDelete safely deletes a workspace by org+name (checks for active infrastructure)
@@ -2690,6 +2814,14 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 		}
 	}
 
+	// Update auto-queue-runs. This handler is the path the stock provider uses for
+	// tfe_workspace updates (go-tfe Workspaces.UpdateByID), so an attribute missing here is
+	// silently dropped on a 200 and the config drifts forever - keep it in sync with the
+	// by-name Update above. Covered by TestWorkspaceUpdateHandlersApplySameAttributes.
+	if attrs.AutoQueueRuns != nil {
+		workspace.AutoQueueRuns = *attrs.AutoQueueRuns
+	}
+
 	// Update auto-apply
 	if attrs.AutoApply != nil {
 		workspace.AutoApply = *attrs.AutoApply
@@ -2723,6 +2855,11 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 	// Update VCS connection
 	if attrs.VCSConnectionID != nil {
 		workspace.VCSConnectionID = attrs.VCSConnectionID
+	}
+
+	// Update VCS provider (see the auto-queue-runs note above on staying in sync with Update)
+	if attrs.VCSProvider != "" {
+		workspace.VCSProvider = attrs.VCSProvider
 	}
 
 	// Update VCS repository
@@ -2780,19 +2917,12 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 		workspace.AssessmentsEnabled = *attrs.AssessmentsEnabled
 	}
 
-	// Update trigger-prefixes
-	if len(attrs.TriggerPrefixes) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPrefixes); err == nil {
-			workspace.TriggerPrefixes = string(data)
-		}
+	// Update trigger-prefixes / trigger-patterns
+	if triggerListsConflict(attrs.TriggerPrefixes, attrs.TriggerPatterns) {
+		triggerListConflictResponse(c)
+		return
 	}
-
-	// Update trigger-patterns
-	if len(attrs.TriggerPatterns) > 0 {
-		if data, err := json.Marshal(attrs.TriggerPatterns); err == nil {
-			workspace.TriggerPatterns = string(data)
-		}
-	}
+	applyTriggerLists(workspace, attrs.TriggerPrefixes, attrs.TriggerPatterns, nil)
 
 	// Update tag-names
 	if len(attrs.TagNames) > 0 {
