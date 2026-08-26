@@ -105,14 +105,27 @@ func updatePRStatusCheck(
 	// Status check context: terraform-plan/<workspace-name>
 	statusContext := fmt.Sprintf("terraform-plan/%s", workspace.Name)
 
+	// tfe_organization aggregated_commit_status_enabled: post ONE rolled-up context per commit for
+	// the org instead of one per workspace. The per-run dedup gate above still decides WHEN a post
+	// happens (this run's own state changed - and LastCommitStatusState keeps recording the run's
+	// own state, not the aggregate, so the gate stays stable); the posted payload is recomputed
+	// across all of the commit's speculative runs in the org.
+	postState, postDescription := state, description
+	if workspace.Project.Organization.AggregatedCommitStatusEnabled {
+		statusContext = "terraform-plan"
+		if aggState, aggDescription, ok := aggregateCommitStatus(runRepo, configVersion.CommitHash, workspace.Project.OrganizationID); ok {
+			postState, postDescription = aggState, aggDescription
+		}
+	}
+
 	// Dispatch to the correct provider. posted is true only when the provider actually accepted
 	// the status; we persist the new state only then so a failed POST is retried next tick.
 	posted := false
 	switch vcsConn.Provider {
 	case models.VCSProviderGitHub:
-		posted = updateGitHubStatusCheck(ctx, run, vcsConn, owner, repo, configVersion.CommitHash, statusContext, state, description, targetURL, statusService)
+		posted = updateGitHubStatusCheck(ctx, run, vcsConn, owner, repo, configVersion.CommitHash, statusContext, postState, postDescription, targetURL, statusService)
 	case models.VCSProviderAzureDevOps:
-		posted = updateADOStatusCheck(ctx, run, vcsConn, configVersion, owner, repo, statusContext, state, description, targetURL, adoStatusService, vcsRegistry)
+		posted = updateADOStatusCheck(ctx, run, vcsConn, configVersion, owner, repo, statusContext, postState, postDescription, targetURL, adoStatusService, vcsRegistry)
 	case models.VCSProviderGitLab, models.VCSProviderBitbucket:
 		logger.Infof("[STATUS_CHECK] Provider %s does not support PR status checks yet, skipping for run %s", vcsConn.Provider, run.ID)
 	default:
@@ -124,6 +137,49 @@ func updatePRStatusCheck(
 		if err := runRepo.SetLastCommitStatusState(run.ID, string(state)); err != nil {
 			logger.Warnf("[STATUS_CHECK] Failed to persist last status state for run %s: %v", run.ID, err)
 		}
+	}
+}
+
+// aggregateCommitStatus folds every speculative run for one commit in the org into a single
+// status (tfe_organization aggregated_commit_status_enabled): worst state wins, with a
+// passed/total description. Returns ok=false when nothing aggregatable was found (the caller then
+// falls back to the per-run state).
+func aggregateCommitStatus(runRepo *repository.RunRepository, commitHash string, orgID uuid.UUID) (vcs.StatusState, string, bool) {
+	runs, err := runRepo.ListSpeculativeRunsByCommitInOrg(commitHash, orgID)
+	if err != nil {
+		logger.Warnf("[STATUS_CHECK] Failed to aggregate commit status for %s: %v", commitHash, err)
+		return "", "", false
+	}
+	var pending, passed, failed, cancelled int
+	for i := range runs {
+		st, _, ok := mapRunStatusToCheckState(&runs[i])
+		if !ok {
+			continue
+		}
+		switch st {
+		case vcs.StatusStatePending:
+			pending++
+		case vcs.StatusStateSuccess:
+			passed++
+		case vcs.StatusStateFailure:
+			failed++
+		case vcs.StatusStateError:
+			cancelled++
+		}
+	}
+	total := pending + passed + failed + cancelled
+	if total == 0 {
+		return "", "", false
+	}
+	switch {
+	case failed > 0:
+		return vcs.StatusStateFailure, fmt.Sprintf("%d of %d workspace plans failed", failed, total), true
+	case cancelled > 0:
+		return vcs.StatusStateError, fmt.Sprintf("%d of %d workspace plans were cancelled", cancelled, total), true
+	case pending > 0:
+		return vcs.StatusStatePending, fmt.Sprintf("%d of %d workspace plans completed", passed, total), true
+	default:
+		return vcs.StatusStateSuccess, fmt.Sprintf("All %d workspace plans passed", total), true
 	}
 }
 

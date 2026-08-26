@@ -815,6 +815,10 @@ func (h *VCSAppInstallationHandlerV2) handleAzureDevOpsPullRequestEvent(c *gin.C
 				pathFiltered = append(pathFiltered, ws)
 			}
 		}
+		// tfe_organization send_passing_statuses_for_untriggered_speculative_plans (ADO): skipped
+		// workspaces still get a passing PR status when their org opts in.
+		h.postUntriggeredPassingStatusesADO(context.Background(),
+			splitUntriggeredWorkspaces(filteredWorkspaces, pathFiltered), wp.PRNumber)
 		if len(pathFiltered) == 0 {
 			h.recordWebhookEvent(nil, "pull_request", "azure_devops", wp.Repository, wp.BaseBranch, wp.Commit, "ignored",
 				fmt.Sprintf("No workspaces match changed files (%d with speculative enabled)", len(filteredWorkspaces)),
@@ -962,6 +966,12 @@ func (h *VCSAppInstallationHandlerV2) handleAzureDevOpsPullRequestEvent(c *gin.C
 				return
 			}
 
+			// tfe_organization speculative_plan_management_enabled (default on): cancel superseded
+			// speculative plans for this branch/PR before queueing the new one.
+			if wsOrg := h.orgForWorkspace(&ws); wsOrg == nil || wsOrg.SpeculativePlanManagement() {
+				terraform.AutoCancelSupersededSpeculativeRuns(h.runRepo, h.configVersionRepo, ws.ID, wp.HeadBranch, wp.PRNumber)
+			}
+
 			// Create plan-only (speculative) run
 			run := &models.Run{
 				WorkspaceID:            ws.ID,
@@ -999,6 +1009,10 @@ func (h *VCSAppInstallationHandlerV2) handleAzureDevOpsPullRequestEvent(c *gin.C
 					}
 
 					statusContext := fmt.Sprintf("terraform-plan/%s", ws.Name)
+					if wsOrg := h.orgForWorkspace(&ws); wsOrg != nil && wsOrg.AggregatedCommitStatusEnabled {
+						// tfe_organization aggregated_commit_status_enabled: one rolled-up context.
+						statusContext = "terraform-plan"
+					}
 					token, tokenErr := func() (string, error) {
 						if h.vcsRegistry != nil {
 							if provider, pErr := h.vcsRegistry.GetProvider(vcsConn); pErr == nil {
@@ -2284,6 +2298,10 @@ func (h *VCSAppInstallationHandlerV2) handlePullRequestEvent(c *gin.Context, pay
 				logger.Infof("Workspace %s (path: %q) skipped - no files in its path were changed", workspace.ID, workspace.WorkingDirectory)
 			}
 		}
+		// tfe_organization send_passing_statuses_for_untriggered_speculative_plans: workspaces the
+		// path filter skipped still get a passing status when their org opts in.
+		h.postUntriggeredPassingStatuses(context.Background(),
+			splitUntriggeredWorkspaces(filteredWorkspaces, finalFilteredWorkspaces), headSHA)
 		if len(finalFilteredWorkspaces) == 0 {
 			logger.Infof("No workspaces match the changed files for PR #%d (found %d workspace(s) but none match path filters)", prNumber, len(filteredWorkspaces))
 			c.JSON(http.StatusOK, gin.H{
@@ -2505,6 +2523,13 @@ func (h *VCSAppInstallationHandlerV2) handlePullRequestEvent(c *gin.Context, pay
 				return
 			}
 
+			// tfe_organization speculative_plan_management_enabled (default on): a newer commit to
+			// this branch/PR supersedes still-pending speculative plans - cancel them before
+			// queueing the new one.
+			if wsOrg := h.orgForWorkspace(&ws); wsOrg == nil || wsOrg.SpeculativePlanManagement() {
+				terraform.AutoCancelSupersededSpeculativeRuns(h.runRepo, h.configVersionRepo, ws.ID, headBranch, prNumber)
+			}
+
 			// Create plan-only run (speculative)
 			run := &models.Run{
 				WorkspaceID:            ws.ID,
@@ -2578,6 +2603,11 @@ func (h *VCSAppInstallationHandlerV2) handlePullRequestEvent(c *gin.Context, pay
 
 				// Status check context: terraform-plan/<workspace-name>
 				statusContext := fmt.Sprintf("terraform-plan/%s", ws.Name)
+				if wsOrg := h.orgForWorkspace(&ws); wsOrg != nil && wsOrg.AggregatedCommitStatusEnabled {
+					// tfe_organization aggregated_commit_status_enabled: one rolled-up context per
+					// commit instead of one per workspace.
+					statusContext = "terraform-plan"
+				}
 
 				logger.Infof("Creating status check for run %s - installationID=%s, owner=%s, repo=%s, sha=%s, context=%s",
 					run.ID, vcsConn.InstallationID, owner, repo, headSHA, statusContext)
@@ -2621,112 +2651,6 @@ func (h *VCSAppInstallationHandlerV2) handlePullRequestEvent(c *gin.Context, pay
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("Pull request event processed: %d workspace(s) queued for speculative plans", len(filteredWorkspaces)),
 	})
-}
-
-// isWorkspaceAffected checks if a workspace is affected by changed files based on its WorkingDirectory path
-// Implements GitOps-style path-based filtering: only triggers workspace if files in its path are changed
-func (h *VCSAppInstallationHandlerV2) isWorkspaceAffected(workspace models.Workspace, commits []struct {
-	Added    []string `json:"added"`
-	Removed  []string `json:"removed"`
-	Modified []string `json:"modified"`
-},
-) bool {
-	// If WorkingDirectory is empty or root, match all changes (root-level workspace)
-	workingDir := strings.TrimSpace(workspace.WorkingDirectory)
-	if workingDir == "" || workingDir == "/" {
-		logger.Infof("Workspace %s - working directory is empty/root, matching all changes", workspace.ID)
-		return true
-	}
-
-	// Normalize the working directory path (remove leading/trailing slashes, ensure it ends with / for prefix matching)
-	originalWorkingDir := workingDir
-	workingDir = strings.TrimPrefix(workingDir, "/")
-	workingDir = strings.TrimSuffix(workingDir, "/")
-	if workingDir == "" {
-		// After normalization, if empty, it's root-level
-		logger.Infof("Workspace %s - working directory normalized to empty, matching all changes", workspace.ID)
-		return true
-	}
-	// Add trailing slash for proper prefix matching
-	workingDirPrefix := workingDir + "/"
-
-	// Collect all changed files from all commits
-	allChangedFiles := make(map[string]bool)
-	for _, commit := range commits {
-		for _, file := range commit.Added {
-			allChangedFiles[file] = true
-		}
-		for _, file := range commit.Modified {
-			allChangedFiles[file] = true
-		}
-		for _, file := range commit.Removed {
-			allChangedFiles[file] = true
-		}
-	}
-
-	logger.Infof("Workspace %s - checking path filter: workingDir=%q (normalized=%q, prefix=%q), changedFiles=%v",
-		workspace.ID, originalWorkingDir, workingDir, workingDirPrefix, getKeys(allChangedFiles))
-
-	// Check if any changed file is within the workspace's working directory
-	// A workspace with working_directory="proxmox" should match files in "proxmox/" and all subdirectories
-	// A workspace with working_directory="proxmox/passwd" should only match files in "proxmox/passwd/"
-	for file := range allChangedFiles {
-		// Normalize file path (remove leading slash)
-		normalizedFile := strings.TrimPrefix(file, "/")
-
-		// Check if file is exactly in the working directory or in a subdirectory
-		// This correctly handles:
-		// - workingDir="proxmox" matches "proxmox/main.tf" and "proxmox/passwd/main.tf"
-		// - workingDir="proxmox/passwd" matches "proxmox/passwd/main.tf" but NOT "proxmox/api/main.tf"
-		matches := normalizedFile == workingDir || strings.HasPrefix(normalizedFile, workingDirPrefix)
-		if matches {
-			logger.Infof("Workspace %s - file %q matches working directory %q (normalized: %q, prefix: %q)",
-				workspace.ID, file, workingDir, normalizedFile, workingDirPrefix)
-			return true
-		}
-	}
-
-	logger.Infof("Workspace %s - no files match working directory %q", workspace.ID, workingDir)
-	return false
-}
-
-// isWorkspaceAffectedByFiles checks if a workspace is affected by a list of changed files
-// This is a simpler version that works with a flat list of file paths
-func (h *VCSAppInstallationHandlerV2) isWorkspaceAffectedByFiles(workspace models.Workspace, changedFiles []string) bool {
-	workingDir := strings.TrimSpace(workspace.WorkingDirectory)
-
-	// Normalize the working directory path
-	workingDir = strings.TrimPrefix(workingDir, "/")
-	workingDir = strings.TrimSuffix(workingDir, "/")
-
-	// A root-level workspace (empty or "/" working directory) is affected by ANY
-	// change in the repository. This matches isWorkspaceAffected, which serves the
-	// GitHub push path, and the documented contract in
-	// docs/features/terraform/vcs-path-filtering.md ("Trigger for any file change
-	// in the repository").
-	//
-	// This previously matched only files at the repository root (no "/" in the
-	// path), so the same workspace triggered on a GitHub push but not on a GitHub
-	// pull request or any Azure DevOps event - a change under modules/ was silently
-	// skipped on those paths.
-	if workingDir == "" {
-		return len(changedFiles) > 0
-	}
-
-	// Add trailing slash for proper prefix matching
-	workingDirPrefix := workingDir + "/"
-
-	// Check if any changed file is within the workspace's working directory
-	for _, file := range changedFiles {
-		// Normalize file path (remove leading slash)
-		normalizedFile := strings.TrimPrefix(file, "/")
-		// Check if file is in the workspace's directory
-		if normalizedFile == workingDir || strings.HasPrefix(normalizedFile, workingDirPrefix) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // getPRChangedFiles uses git diff to get the list of files changed between base and head branches
