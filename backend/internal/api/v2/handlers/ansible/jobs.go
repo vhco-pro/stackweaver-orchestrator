@@ -158,11 +158,7 @@ func (h *JobHandler) ListByProject(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page[number]", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("page[size]", "20"))
-	if perPage > 100 {
-		perPage = 100
-	}
+	page, perPage := jsonapi.PageParams(c, 20, 100)
 	offset := (page - 1) * perPage
 
 	jobs, total, err := h.jobService.ListJobsByProject(projectID, perPage, offset)
@@ -202,11 +198,7 @@ func (h *JobHandler) ListByOrganization(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page[number]", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("page[size]", "20"))
-	if perPage > 100 {
-		perPage = 100
-	}
+	page, perPage := jsonapi.PageParams(c, 20, 100)
 	offset := (page - 1) * perPage
 
 	jobs, total, err := h.jobService.ListJobsByOrganization(org.ID, perPage, offset)
@@ -246,18 +238,23 @@ func (h *JobHandler) GetQueue(c *gin.Context) {
 		return
 	}
 
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	if limit > 100 {
-		limit = 100
-	}
+	// page[number]/page[size], matching what the client actually sends (pageQuery in
+	// frontend/src/api/ansible.ts). This read `limit`, which was harmless only while the
+	// endpoint reported no total: now that it reports a true one, total-pages can exceed 1, and
+	// serving page 1 for every page requested is exactly the inventory-sources defect (#761).
+	page, limit := jsonapi.PageParams(c, 50, 100)
 
-	jobs, err := h.jobService.GetJobQueue(org.ID, limit)
+	// A top-N view of the queue, not a pageable collection: the caller gets the oldest `limit`
+	// and there is no page 2. The block is still honest about that - one page of `limit`, and a
+	// total-count describing the whole queue, which is what tells an operator whether they are
+	// seeing all of it (#773).
+	jobs, total, err := h.jobService.GetJobQueue(org.ID, limit, jsonapi.Offset(page, limit))
 	if err != nil {
 		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get job queue")
 		return
 	}
 
-	jsonapi.WriteDocument(c, http.StatusOK, formatJobsResponse(jobs))
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobsResponse(jobs), jsonapi.NewPaginationMeta(page, limit, total))
 }
 
 // Launch launches a new job
@@ -807,11 +804,7 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page[number]", "1"))
-	perPage, _ := strconv.Atoi(c.DefaultQuery("page[size]", "100"))
-	if perPage > 500 {
-		perPage = 500
-	}
+	page, perPage := jsonapi.PageParams(c, 100, 500)
 	offset := (page - 1) * perPage
 
 	events, total, err := h.jobService.GetJobEventsFiltered(id, filter, perPage, offset)
