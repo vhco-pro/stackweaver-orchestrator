@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/response"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -230,7 +231,7 @@ func (h *InventorySourceHandler) Create(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": formatInventorySourceResponse(source)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatInventorySourceResponse(source))
 }
 
 // Get retrieves an inventory source by ID
@@ -255,7 +256,7 @@ func (h *InventorySourceHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatInventorySourceResponse(source)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatInventorySourceResponse(source))
 }
 
 // List lists inventory sources for an inventory
@@ -264,9 +265,9 @@ func (h *InventorySourceHandler) Get(c *gin.Context) {
 // @Tags Ansible Inventory Sources
 // @Produce json
 // @Param id path string true "Inventory ID"
-// @Param limit query int false "Limit" default(20)
-// @Param offset query int false "Offset" default(0)
-// @Success 200 {object} response.PaginatedResponse
+// @Param page[number] query int false "Page number" default(1)
+// @Param page[size] query int false "Page size" default(20)
+// @Success 200 {object} jsonapi.Document
 // @Failure 400 {object} response.ErrorResponse
 // @Router /api/v2/ansible/inventories/{id}/sources [get]
 func (h *InventorySourceHandler) List(c *gin.Context) {
@@ -287,29 +288,25 @@ func (h *InventorySourceHandler) List(c *gin.Context) {
 		return
 	}
 
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	// page[number]/page[size], not limit/offset. This handler already emitted correct pagination
+	// meta, which made the mismatch worse rather than harmless: fetchAllPages
+	// (frontend/src/lib/pagination.ts) believed the total-pages it was told, asked for page 2,
+	// and got page 1 back because the offset it sent was never read - so the Sources tab listed
+	// every row twice and never reached the ones past the first page.
+	page, _ := strconv.Atoi(c.DefaultQuery("page[number]", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("page[size]", "20"))
+	if perPage > 100 {
+		perPage = 100
+	}
+	offset := (page - 1) * perPage
 
-	sources, total, err := h.sourceService.ListInventorySources(inventoryID, limit, offset)
+	sources, total, err := h.sourceService.ListInventorySources(inventoryID, perPage, offset)
 	if err != nil {
 		response.InternalError(c, err.Error())
 		return
 	}
 
-	page := offset/limit + 1
-	totalPages := (total + int64(limit) - 1) / int64(limit)
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatInventorySourcesResponse(sources),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    limit,
-				"total-count":  total,
-				"total-pages":  totalPages,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatInventorySourcesResponse(sources), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // Update updates an inventory source
@@ -382,7 +379,7 @@ func (h *InventorySourceHandler) Update(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatInventorySourceResponse(source)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatInventorySourceResponse(source))
 }
 
 // Delete deletes an inventory source
@@ -422,7 +419,7 @@ func (h *InventorySourceHandler) Delete(c *gin.Context) {
 // @Success 200 {object} ansible.SyncResult
 // @Failure 400 {object} response.ErrorResponse
 // @Failure 500 {object} response.ErrorResponse
-// @Router /api/v2/ansible/inventory-sources/{id}/sync [post]
+// @Router /api/v2/ansible/inventory-sources/{source_id}/actions/sync [post]
 func (h *InventorySourceHandler) Sync(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("source_id"))
 	if err != nil {
@@ -467,65 +464,55 @@ func (h *InventorySourceHandler) Sync(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{"data": formatInventorySourceResponse(source)})
+	jsonapi.WriteDocument(c, http.StatusAccepted, formatInventorySourceResponse(source))
 }
 
 // formatInventorySourceResponse formats a source for JSON:API response
-func formatInventorySourceResponse(source *models.AnsibleInventorySource) gin.H {
-	resp := gin.H{
-		"id":   source.ID.String(),
-		"type": "inventory-sources",
-		"attributes": gin.H{
-			"name":                       source.Name,
-			"description":                source.Description,
-			"source-type":                string(source.Type),
-			"config":                     source.Config,
-			"update-on-launch":           source.UpdateOnLaunch,
-			"update-cache-timeout":       source.UpdateCacheTimeout,
-			"overwrite":                  source.Overwrite,
-			"overwrite-vars":             source.OverwriteVars,
-			"verbosity":                  source.Verbosity,
-			"group-by-instance-id":       source.GroupByInstanceID,
-			"group-by-region":            source.GroupByRegion,
-			"group-by-availability-zone": source.GroupByAvailabilityZone,
-			"group-by-tag":               source.GroupByTag,
-			"hostname-var":               source.HostnameVar,
-			"instance-filters":           source.InstanceFilters,
-			"sync-schedule":              source.SyncSchedule,
-			"status":                     string(source.Status),
-			"last-sync-at":               source.LastSyncAt,
-			"last-sync-error":            source.LastSyncError,
-			"last-sync-log":              source.LastSyncLog,
-			"hosts-count":                source.HostsCount,
-			"enabled":                    source.Enabled,
-			"created-at":                 source.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			"updated-at":                 source.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		},
-		"relationships": gin.H{
-			"inventory": gin.H{
-				"data": gin.H{
-					"id":   source.InventoryID.String(),
-					"type": "ansible-inventories",
-				},
-			},
-		},
+func formatInventorySourceResponse(source *models.AnsibleInventorySource) jsonapi.Resource[InventorySourceAttributes] {
+	relationships := InventorySourceRelationships{
+		Inventory: jsonapi.ToOne(source.InventoryID.String(), "ansible-inventories"),
 	}
-
 	if source.CredentialID != nil {
-		resp["relationships"].(gin.H)["credential"] = gin.H{
-			"data": gin.H{
-				"id":   source.CredentialID.String(),
-				"type": "ansible-credentials",
-			},
-		}
+		r := jsonapi.ToOne(source.CredentialID.String(), "ansible-credentials")
+		relationships.Credential = &r
 	}
 
-	return resp
+	return jsonapi.Resource[InventorySourceAttributes]{
+		ID:   source.ID.String(),
+		Type: "inventory-sources",
+		Attributes: InventorySourceAttributes{
+			Name:                    source.Name,
+			Description:             source.Description,
+			SourceType:              string(source.Type),
+			Config:                  source.Config,
+			UpdateOnLaunch:          source.UpdateOnLaunch,
+			UpdateCacheTimeout:      source.UpdateCacheTimeout,
+			Overwrite:               source.Overwrite,
+			OverwriteVars:           source.OverwriteVars,
+			Verbosity:               source.Verbosity,
+			GroupByInstanceID:       source.GroupByInstanceID,
+			GroupByRegion:           source.GroupByRegion,
+			GroupByAvailabilityZone: source.GroupByAvailabilityZone,
+			GroupByTag:              source.GroupByTag,
+			HostnameVar:             source.HostnameVar,
+			InstanceFilters:         source.InstanceFilters,
+			SyncSchedule:            source.SyncSchedule,
+			Status:                  string(source.Status),
+			LastSyncAt:              source.LastSyncAt,
+			LastSyncError:           source.LastSyncError,
+			LastSyncLog:             source.LastSyncLog,
+			HostsCount:              source.HostsCount,
+			Enabled:                 source.Enabled,
+			CreatedAt:               source.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:               source.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		},
+		Relationships: relationships,
+	}
 }
 
 // formatInventorySourcesResponse formats multiple sources for JSON:API response
-func formatInventorySourcesResponse(sources []models.AnsibleInventorySource) []gin.H {
-	result := make([]gin.H, len(sources))
+func formatInventorySourcesResponse(sources []models.AnsibleInventorySource) []jsonapi.Resource[InventorySourceAttributes] {
+	result := make([]jsonapi.Resource[InventorySourceAttributes], len(sources))
 	for i := range sources {
 		result[i] = formatInventorySourceResponse(&sources[i])
 	}

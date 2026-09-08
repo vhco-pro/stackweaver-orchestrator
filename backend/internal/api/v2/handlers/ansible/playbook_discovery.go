@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/core/models"
 	"gorm.io/gorm"
 )
@@ -162,12 +163,12 @@ type discoveryContext struct {
 func (h *PlaybookHandler) resolveDiscoveryContext(c *gin.Context, connectionID string, write bool) *discoveryContext {
 	org, err := h.orgRepo.GetByName(c.Param("name"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Organization not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return nil
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return nil
 	}
 	var hasPermission bool
@@ -177,22 +178,22 @@ func (h *PlaybookHandler) resolveDiscoveryContext(c *gin.Context, connectionID s
 		hasPermission, err = h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return nil
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to access playbooks in this organization"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to access playbooks in this organization")
 		return nil
 	}
 
 	connID, err := uuid.Parse(connectionID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 		return nil
 	}
 	conn, err := h.vcsConnectionRepo.GetByID(connID)
 	if err != nil || conn.OrganizationID != org.ID {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "VCS connection not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "VCS connection not found")
 		return nil
 	}
 	return &discoveryContext{org: org, conn: conn}
@@ -232,14 +233,14 @@ func (h *PlaybookHandler) ListPlaybookFiles(c *gin.Context) {
 	branch := c.Query("branch")
 	scopePath := c.Query("path")
 	if repository == "" || !strings.Contains(repository, "/") {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "repository must be in owner/repo format"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "repository must be in owner/repo format")
 		return
 	}
 	// Branch is required: the file listing, the registered-playbook annotation,
 	// and any subsequent import must all refer to the same branch (a silent
 	// default would diverge from repositories whose default branch is not it).
 	if branch == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "branch is required"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "branch is required")
 		return
 	}
 
@@ -250,7 +251,7 @@ func (h *PlaybookHandler) ListPlaybookFiles(c *gin.Context) {
 
 	provider, err := h.vcsRegistry.GetProvider(dc.conn)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to resolve VCS provider: %v", err)}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to resolve VCS provider: %v", err))
 		return
 	}
 
@@ -258,9 +259,9 @@ func (h *PlaybookHandler) ListPlaybookFiles(c *gin.Context) {
 	files, err := provider.ListFiles(c.Request.Context(), dc.conn, owner, repo, branch, []string{".yml", ".yaml"})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "not implemented") {
-			c.JSON(http.StatusNotImplemented, gin.H{"errors": []gin.H{{"status": "501", "title": "Not Implemented", "detail": fmt.Sprintf("File listing is not yet supported for %s", dc.conn.Provider)}}})
+			jsonapi.WriteError(c, http.StatusNotImplemented, "Not Implemented", fmt.Sprintf("File listing is not yet supported for %s", dc.conn.Provider))
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to list repository files: %v", err)}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to list repository files: %v", err))
 		}
 		return
 	}
@@ -269,22 +270,22 @@ func (h *PlaybookHandler) ListPlaybookFiles(c *gin.Context) {
 
 	registered, err := h.findRegisteredPlaybooks(dc.conn.ID, uuid.Nil, repository, branch)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to load registered playbooks"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to load registered playbooks")
 		return
 	}
 
-	entries := make([]gin.H, 0, len(candidates))
+	entries := make([]DiscoveredPlaybook, 0, len(candidates))
 	for _, filePath := range candidates {
-		entry := gin.H{"path": filePath, "name": path.Base(filePath), "registered": false}
+		entry := DiscoveredPlaybook{Path: filePath, Name: path.Base(filePath)}
 		if pb, ok := registered[filePath]; ok {
-			entry["registered"] = true
-			entry["playbook_id"] = pb.ID.String()
-			entry["playbook_name"] = pb.Name
+			entry.Registered = true
+			entry.PlaybookID = pb.ID.String()
+			entry.PlaybookName = pb.Name
 		}
 		entries = append(entries, entry)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": entries})
+	jsonapi.WriteDocument(c, http.StatusOK, entries)
 }
 
 // BulkImportRequest is the body of the bulk-import action.
@@ -347,15 +348,15 @@ func (h *PlaybookHandler) importOnePlaybook(
 func (h *PlaybookHandler) BulkImportPlaybooks(c *gin.Context) {
 	var req BulkImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 	if len(req.Playbooks) == 0 || len(req.Playbooks) > maxBulkImportEntries {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": fmt.Sprintf("playbooks must contain between 1 and %d entries", maxBulkImportEntries)}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", fmt.Sprintf("playbooks must contain between 1 and %d entries", maxBulkImportEntries))
 		return
 	}
 	if req.Repository == "" || !strings.Contains(req.Repository, "/") || req.Branch == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "repository (owner/repo) and branch are required"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "repository (owner/repo) and branch are required")
 		return
 	}
 
@@ -371,24 +372,24 @@ func (h *PlaybookHandler) BulkImportPlaybooks(c *gin.Context) {
 
 	registered, err := h.findRegisteredPlaybooks(dc.conn.ID, projectID, req.Repository, req.Branch)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to load registered playbooks"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to load registered playbooks")
 		return
 	}
 
-	results := make([]gin.H, 0, len(req.Playbooks))
+	results := make([]BulkImportResult, 0, len(req.Playbooks))
 	created, skipped, failed := 0, 0, 0
 	for _, entry := range req.Playbooks {
 		playbook, wasCreated, err := h.importOnePlaybook(registered, projectID, dc.conn.ID, req.Repository, req.Branch, entry.Path, entry.Name, req.SourceMode)
 		switch {
 		case err != nil:
 			failed++
-			results = append(results, gin.H{"path": entry.Path, "status": "failed", "error": err.Error()})
+			results = append(results, BulkImportResult{Path: entry.Path, Status: "failed", Error: err.Error()})
 		case wasCreated:
 			created++
-			results = append(results, gin.H{"path": entry.Path, "status": "created", "playbook_id": playbook.ID.String(), "name": playbook.Name})
+			results = append(results, BulkImportResult{Path: entry.Path, Status: "created", PlaybookID: playbook.ID.String(), Name: playbook.Name})
 		default:
 			skipped++
-			results = append(results, gin.H{"path": entry.Path, "status": "skipped", "playbook_id": playbook.ID.String(), "name": playbook.Name})
+			results = append(results, BulkImportResult{Path: entry.Path, Status: "skipped", PlaybookID: playbook.ID.String(), Name: playbook.Name})
 		}
 	}
 
@@ -397,12 +398,12 @@ func (h *PlaybookHandler) BulkImportPlaybooks(c *gin.Context) {
 		h.maybeRegisterADOWebhook(&dc.conn.ID, req.Repository)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"results": results,
-		"created": created,
-		"skipped": skipped,
-		"failed":  failed,
-	}})
+	jsonapi.WriteDocument(c, http.StatusOK, BulkImportResponse{
+		Results: results,
+		Created: created,
+		Skipped: skipped,
+		Failed:  failed,
+	})
 }
 
 // FindOrCreateRequest is the body of the find-or-create action.
@@ -423,11 +424,11 @@ type FindOrCreateRequest struct {
 func (h *PlaybookHandler) FindOrCreatePlaybook(c *gin.Context) {
 	var req FindOrCreateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 	if req.Repository == "" || !strings.Contains(req.Repository, "/") || req.Path == "" || req.Branch == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "repository (owner/repo), branch, and path are required"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "repository (owner/repo), branch, and path are required")
 		return
 	}
 
@@ -443,13 +444,13 @@ func (h *PlaybookHandler) FindOrCreatePlaybook(c *gin.Context) {
 
 	registered, err := h.findRegisteredPlaybooks(dc.conn.ID, projectID, req.Repository, req.Branch)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to load registered playbooks"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to load registered playbooks")
 		return
 	}
 
 	playbook, wasCreated, err := h.importOnePlaybook(registered, projectID, dc.conn.ID, req.Repository, req.Branch, req.Path, req.Name, req.SourceMode)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to register playbook: %v", err)}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to register playbook: %v", err))
 		return
 	}
 	if wasCreated {
@@ -461,7 +462,7 @@ func (h *PlaybookHandler) FindOrCreatePlaybook(c *gin.Context) {
 	if wasCreated {
 		status = http.StatusCreated
 	}
-	c.JSON(status, gin.H{"data": formatPlaybookResponse(playbook), "meta": gin.H{"created": wasCreated}})
+	jsonapi.WriteDocumentMeta(c, status, formatPlaybookResponse(playbook), FindOrCreateMeta{Created: wasCreated})
 }
 
 // resolveProjectForOrg parses and validates an optional project ID against the
@@ -471,19 +472,19 @@ func (h *PlaybookHandler) resolveProjectForOrg(c *gin.Context, org *models.Organ
 	if projectIDStr != "" {
 		pid, err := uuid.Parse(projectIDStr)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return uuid.Nil, false
 		}
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to this organization"}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to this organization")
 			return uuid.Nil, false
 		}
 		return pid, true
 	}
 	projects, _, err := h.projectRepo.ListByOrganization(org.ID, 1, 0)
 	if err != nil || len(projects) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Organization must have at least one project to create playbooks"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Organization must have at least one project to create playbooks")
 		return uuid.Nil, false
 	}
 	return projects[0].ID, true

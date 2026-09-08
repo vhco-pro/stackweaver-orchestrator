@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -66,24 +67,24 @@ type workspaceTaskRequest struct {
 
 // formatWorkspaceTask renders an attachment as JSON:API. BOTH `stage` (deprecated, = stages[0]) and
 // `stages` are emitted: the provider stores both and go-tfe decodes both.
-func formatWorkspaceTask(wt *models.WorkspaceTask) gin.H {
+func formatWorkspaceTask(wt *models.WorkspaceTask) jsonapi.Resource[WorkspaceTaskAttributes] {
 	stages := wt.Stages
 	if len(stages) == 0 {
 		stages = models.StringArray{models.TaskStagePostPlan}
 	}
-	return gin.H{
-		"id":   wt.ID,
-		"type": "workspace-tasks",
-		"attributes": gin.H{
-			"enforcement-level": wt.EnforcementLevel,
-			"stage":             stages[0],
-			"stages":            stages,
-			"created-at":        wt.CreatedAt.Format(time.RFC3339),
-			"updated-at":        wt.UpdatedAt.Format(time.RFC3339),
+	return jsonapi.Resource[WorkspaceTaskAttributes]{
+		ID:   wt.ID,
+		Type: "workspace-tasks",
+		Attributes: WorkspaceTaskAttributes{
+			EnforcementLevel: wt.EnforcementLevel,
+			Stage:            stages[0],
+			Stages:           stages,
+			CreatedAt:        wt.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:        wt.UpdatedAt.Format(time.RFC3339),
 		},
-		"relationships": gin.H{
-			"task":      gin.H{"data": gin.H{"id": wt.TaskID, "type": "tasks"}},
-			"workspace": gin.H{"data": gin.H{"id": wt.WorkspaceID, "type": "workspaces"}},
+		Relationships: WorkspaceTaskRelationships{
+			Task:      jsonapi.ToOne(wt.TaskID, "tasks"),
+			Workspace: jsonapi.ToOne(wt.WorkspaceID, "workspaces"),
 		},
 	}
 }
@@ -199,7 +200,7 @@ func (h *WorkspaceRunTaskHandlerV2) Create(c *gin.Context) {
 		taskError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to attach run task")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"data": formatWorkspaceTask(wt)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatWorkspaceTask(wt))
 }
 
 // List handles GET /workspaces/:id/tasks.
@@ -214,11 +215,11 @@ func (h *WorkspaceRunTaskHandlerV2) List(c *gin.Context) {
 		taskError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list workspace run tasks")
 		return
 	}
-	data := make([]gin.H, 0, len(wts))
+	data := make([]jsonapi.Resource[WorkspaceTaskAttributes], 0, len(wts))
 	for i := range wts {
 		data = append(data, formatWorkspaceTask(&wts[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "meta": fullPaginationMeta(page, pageSize, total)})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, pageSize, total))
 }
 
 // Read handles GET /workspaces/:id/tasks/:tid.
@@ -227,7 +228,7 @@ func (h *WorkspaceRunTaskHandlerV2) Read(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatWorkspaceTask(wt)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceTask(wt))
 }
 
 // Update handles PATCH /workspaces/:id/tasks/:tid.
@@ -260,7 +261,7 @@ func (h *WorkspaceRunTaskHandlerV2) Update(c *gin.Context) {
 		taskError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update workspace run task")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatWorkspaceTask(wt)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceTask(wt))
 }
 
 // Delete handles DELETE /workspaces/:id/tasks/:tid.

@@ -1,0 +1,65 @@
+{
+  "method": "GET",
+  "path": "/api/v2/ansible/jobs/:id",
+  "status": 200,
+  "body": {
+    "data": {
+      "attributes": {
+        "ansible-version": "",
+        "become-enabled": false,
+        "created-at": "\u003ctimestamp\u003e",
+        "diff-mode": false,
+        "error-message": "",
+        "exit-code": null,
+        "extra-vars": {},
+        "finished-at": "\u003ctimestamp\u003e",
+        "forks": "\u003cnumber\u003e",
+        "has-warnings": false,
+        "hosts-changed": "\u003cnumber\u003e",
+        "hosts-failed": "\u003cnumber\u003e",
+        "hosts-ignored": "\u003cnumber\u003e",
+        "hosts-ok": "\u003cnumber\u003e",
+        "hosts-rescued": "\u003cnumber\u003e",
+        "hosts-skipped": "\u003cnumber\u003e",
+        "hosts-total": "\u003cnumber\u003e",
+        "hosts-unreachable": "\u003cnumber\u003e",
+        "job-type": "run",
+        "limit": "",
+        "name": "baseline-compliance - 2026-08-23 08:10",
+        "runner-id": null,
+        "skip-tags": "",
+        "slice-count": "\u003cnumber\u003e",
+        "slice-group-id": null,
+        "slice-number": "\u003cnumber\u003e",
+        "started-at": "\u003ctimestamp\u003e",
+        "status": "successful",
+        "tags": "",
+        "updated-at": "\u003ctimestamp\u003e",
+        "verbosity": "\u003cnumber\u003e",
+        "warnings-count": "\u003cnumber\u003e"
+      },
+      "id": "\u003cuuid\u003e",
+      "relationships": {
+        "inventory": {
+          "data": {
+            "id": "\u003cuuid\u003e",
+            "type": "ansible-inventories"
+          }
+        },
+        "project": {
+          "data": {
+            "id": "\u003cuuid\u003e",
+            "type": "projects"
+          }
+        },
+        "template": {
+          "data": {
+            "id": "\u003cuuid\u003e",
+            "type": "ansible-job-templates"
+          }
+        }
+      },
+      "type": "ansible-jobs"
+    }
+  }
+}

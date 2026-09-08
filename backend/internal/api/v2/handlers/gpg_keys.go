@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/backend/internal/services/registry"
@@ -87,27 +88,22 @@ const privateRegistry = "private"
 // The resource id is the GPG key id (the provider addresses reads/deletes by
 // {namespace}/{key_id} and stores key-id as the Terraform state id), and namespace is
 // the owning organization's name.
-func formatGPGKeyResponse(key *models.GPGKey, namespace string) gin.H {
-	return gin.H{
-		"id":   key.KeyID,
-		"type": gpgKeyType,
-		"attributes": gin.H{
-			"ascii-armor":     key.ASCIIArmor,
-			"created-at":      key.CreatedAt.UTC().Format(time.RFC3339),
-			"updated-at":      key.UpdatedAt.UTC().Format(time.RFC3339),
-			"key-id":          key.KeyID,
-			"namespace":       namespace,
-			"source":          "",
-			"source-url":      nil,
-			"trust-signature": "",
+func formatGPGKeyResponse(key *models.GPGKey, namespace string) jsonapi.Resource[GPGKeyAttributes] {
+	return jsonapi.Resource[GPGKeyAttributes]{
+		ID:   key.KeyID,
+		Type: gpgKeyType,
+		Attributes: GPGKeyAttributes{
+			ASCIIArmor: key.ASCIIArmor,
+			CreatedAt:  key.CreatedAt.UTC().Format(time.RFC3339),
+			UpdatedAt:  key.UpdatedAt.UTC().Format(time.RFC3339),
+			KeyID:      key.KeyID,
+			Namespace:  namespace,
 		},
 	}
 }
 
 func gpgError(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{
-		"errors": []gin.H{{"status": fmt.Sprintf("%d", status), "title": title, "detail": detail}},
-	})
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // CreateGPGKey handles POST /api/registry/:registry/v2/gpg-keys.
@@ -180,7 +176,7 @@ func (h *GPGKeyHandler) CreateGPGKey(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": formatGPGKeyResponse(gpgKey, org.Name)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatGPGKeyResponse(gpgKey, org.Name))
 }
 
 // ListGPGKeys handles GET /api/registry/:registry/v2/gpg-keys?filter[namespace]=org1&filter[namespace]=org2.
@@ -202,7 +198,7 @@ func (h *GPGKeyHandler) ListGPGKeys(c *gin.Context) {
 		return
 	}
 
-	data := make([]gin.H, 0)
+	data := make([]jsonapi.Resource[GPGKeyAttributes], 0)
 	for _, namespace := range namespaces {
 		org, err := h.orgRepo.GetByName(namespace)
 		if err != nil {
@@ -223,7 +219,7 @@ func (h *GPGKeyHandler) ListGPGKeys(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocument(c, http.StatusOK, data)
 }
 
 // GetGPGKey handles GET /api/registry/:registry/v2/gpg-keys/:namespace/:key_id.
@@ -235,7 +231,7 @@ func (h *GPGKeyHandler) GetGPGKey(c *gin.Context) {
 	if !h.requireOrgMember(c, org) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatGPGKeyResponse(key, org.Name)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatGPGKeyResponse(key, org.Name))
 }
 
 // UpdateGPGKey handles PATCH /api/registry/:registry/v2/gpg-keys/:namespace/:key_id.
@@ -250,7 +246,7 @@ func (h *GPGKeyHandler) UpdateGPGKey(c *gin.Context) {
 	if !h.requireOrgMember(c, org) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatGPGKeyResponse(key, org.Name)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatGPGKeyResponse(key, org.Name))
 }
 
 // DeleteGPGKey handles DELETE /api/registry/:registry/v2/gpg-keys/:namespace/:key_id.

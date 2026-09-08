@@ -1,0 +1,30 @@
+{
+  "method": "GET",
+  "path": "/api/v2/run-triggers/:id",
+  "status": 200,
+  "body": {
+    "data": {
+      "attributes": {
+        "created-at": "\u003ctimestamp\u003e",
+        "sourceable-name": "prod-network",
+        "workspace-name": "prod-cluster"
+      },
+      "id": "\u003cid\u003e",
+      "relationships": {
+        "sourceable": {
+          "data": {
+            "id": "\u003cid\u003e",
+            "type": "workspaces"
+          }
+        },
+        "workspace": {
+          "data": {
+            "id": "\u003cid\u003e",
+            "type": "workspaces"
+          }
+        }
+      },
+      "type": "run-triggers"
+    }
+  }
+}

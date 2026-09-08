@@ -18,8 +18,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	v2handlers "github.com/michielvha/stackweaver/backend/internal/api/v2/handlers"
 	"github.com/michielvha/stackweaver/backend/internal/api/middleware"
+	v2handlers "github.com/michielvha/stackweaver/backend/internal/api/v2/handlers"
 )
 
 // testingE2EEnvValue is the exact value STACKWEAVER_ENV must have for the
@@ -58,11 +58,19 @@ func testingResetHandler(limiter *middleware.IPRateLimiter, proxy *v2handlers.Au
 		// Fixture user cleanup is tracked separately (F-pre-2) - it requires
 		// calling Zitadel's user management API with a dedicated fixtures PAT.
 		// This handler is the hook the helper will grow into.
-		c.JSON(http.StatusOK, gin.H{
-			"reset":     true,
-			"cleared":   cleared,
-			"todo":      []string{"fixture_users"},
-			"e2e_build": true,
+		c.JSON(http.StatusOK, e2eResetResponse{
+			Reset:    true,
+			Cleared:  cleared,
+			Todo:     []string{"fixture_users"},
+			E2EBuild: true,
 		})
 	}
+}
+
+// e2eResetResponse is the body of the E2E-only reset endpoint.
+type e2eResetResponse struct {
+	Reset    bool     `json:"reset"`
+	Cleared  []string `json:"cleared"`
+	Todo     []string `json:"todo"`
+	E2EBuild bool     `json:"e2e_build"`
 }

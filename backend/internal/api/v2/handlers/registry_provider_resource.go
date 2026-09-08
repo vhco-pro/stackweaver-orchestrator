@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -83,30 +84,24 @@ func (h *RegistryProviderResourceHandler) requireMember(c *gin.Context, orgID uu
 const registryProviderType = "registry-providers"
 
 func regProvErr(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{
-		"errors": []gin.H{{"status": fmt.Sprintf("%d", status), "title": title, "detail": detail}},
-	})
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // formatRegistryProviderResponse renders a provider as a go-tfe-compatible JSON:API resource.
-func formatRegistryProviderResponse(p *models.Provider) gin.H {
-	return gin.H{
-		"id":   p.ID.String(),
-		"type": registryProviderType,
-		"attributes": gin.H{
-			"name":          p.Name,
-			"namespace":     p.Namespace,
-			"registry-name": p.RegistryName,
-			"created-at":    p.CreatedAt.UTC().Format(time.RFC3339),
-			"updated-at":    p.UpdatedAt.UTC().Format(time.RFC3339),
-			"permissions": gin.H{
-				"can-delete": true,
-			},
+func formatRegistryProviderResponse(p *models.Provider) jsonapi.Resource[RegistryProviderAttributes] {
+	return jsonapi.Resource[RegistryProviderAttributes]{
+		ID:   p.ID.String(),
+		Type: registryProviderType,
+		Attributes: RegistryProviderAttributes{
+			Name:         p.Name,
+			Namespace:    p.Namespace,
+			RegistryName: p.RegistryName,
+			CreatedAt:    p.CreatedAt.UTC().Format(time.RFC3339),
+			UpdatedAt:    p.UpdatedAt.UTC().Format(time.RFC3339),
+			Permissions:  RegistryProviderPermissions{CanDelete: true},
 		},
-		"relationships": gin.H{
-			"organization": gin.H{
-				"data": gin.H{"id": p.Organization.Name, "type": "organizations"},
-			},
+		Relationships: WorkspaceOnlyRelationshipsNamed{
+			Organization: jsonapi.ToOne(p.Organization.Name, "organizations"),
 		},
 	}
 }
@@ -195,7 +190,7 @@ func (h *RegistryProviderResourceHandler) CreateProvider(c *gin.Context) {
 	}
 	provider.Organization = *org
 
-	c.JSON(http.StatusCreated, gin.H{"data": formatRegistryProviderResponse(provider)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatRegistryProviderResponse(provider))
 }
 
 // ListProviders handles GET /api/v2/organizations/:name/registry-providers?filter[registry_name]=private.
@@ -211,17 +206,26 @@ func (h *RegistryProviderResourceHandler) ListProviders(c *gin.Context) {
 	}
 
 	registryName := c.Query("filter[registry_name]")
-	providers, _, err := h.providerRepo.ListByOrganization(org.ID, registryName, 100, 0)
+	// This one caps rows, so it cannot use NewFullPageMeta - stating a total equal to the rows
+	// returned would claim an organization has exactly 100 providers when it has more. The
+	// repository already counts the full set and this call was discarding it.
+	//
+	// Honouring page[number] is not optional once the true total is reported. A cap plus an
+	// honest total means total-pages can exceed 1, and a client that then asks for page 2 must
+	// get page 2: serving page 1 again is how the inventory-sources listing ended up returning
+	// every row twice (#761). Either both, or neither.
+	page, perPage := jsonapi.PageParams(c, 100)
+	providers, total, err := h.providerRepo.ListByOrganization(org.ID, registryName, perPage, jsonapi.Offset(page, perPage))
 	if err != nil {
 		regProvErr(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
-	data := make([]gin.H, 0, len(providers))
+	data := make([]jsonapi.Resource[RegistryProviderAttributes], 0, len(providers))
 	for i := range providers {
 		data = append(data, formatRegistryProviderResponse(&providers[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetProvider handles GET /api/v2/organizations/:name/registry-providers/:registry_name/:namespace/:provider_name.
@@ -233,7 +237,7 @@ func (h *RegistryProviderResourceHandler) GetProvider(c *gin.Context) {
 	if !h.requireMember(c, provider.OrganizationID) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatRegistryProviderResponse(provider)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatRegistryProviderResponse(provider))
 }
 
 // DeleteProvider handles DELETE /api/v2/organizations/:name/registry-providers/:registry_name/:namespace/:provider_name.
@@ -262,7 +266,7 @@ func (h *RegistryProviderResourceHandler) GetProviderByID(c *gin.Context) {
 	if !h.requireMember(c, provider.OrganizationID) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatRegistryProviderResponse(provider)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatRegistryProviderResponse(provider))
 }
 
 // DeleteProviderByID handles DELETE /api/v2/registry-providers/:id.

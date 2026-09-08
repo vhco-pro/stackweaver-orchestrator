@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/tofu"
@@ -40,7 +41,7 @@ func NewAdminTofuVersionsHandler(db *gorm.DB, authService *auth.Service) *AdminT
 func (h *AdminTofuVersionsHandler) requireAdmin(c *gin.Context) bool {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil || user == nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Not Found")
 		return false
 	}
 
@@ -53,7 +54,7 @@ func (h *AdminTofuVersionsHandler) requireAdmin(c *gin.Context) bool {
 
 	if count == 0 {
 		logger.Warnf("Admin terraform versions: User %s (%s) denied - not in any owners team", user.Email, user.ID)
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Not Found")
 		return false
 	}
 	return true
@@ -111,11 +112,6 @@ func (h *AdminTofuVersionsHandler) List(c *gin.Context) {
 	offset := (page - 1) * pageSize
 	query.Offset(offset).Limit(pageSize).Find(&versions)
 
-	totalPages := int(totalCount) / pageSize
-	if int(totalCount)%pageSize > 0 {
-		totalPages++
-	}
-
 	// Compute live workspace usage counts for the fetched page.
 	type usageRow struct {
 		TofuVersion string
@@ -139,23 +135,13 @@ func (h *AdminTofuVersionsHandler) List(c *gin.Context) {
 	}
 
 	// Format as JSON:API
-	data := make([]gin.H, 0, len(versions))
+	data := make([]jsonapi.Resource[TofuVersionAttributes], 0, len(versions))
 	for _, v := range versions {
 		v.Usage = usageCounts[v.Version]
 		data = append(data, formatTerraformVersion(&v))
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    pageSize,
-				"total-pages":  totalPages,
-				"total-count":  totalCount,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, pageSize, totalCount))
 }
 
 // Read a single terraform version by ID.
@@ -170,14 +156,14 @@ func (h *AdminTofuVersionsHandler) Read(c *gin.Context) {
 	var version models.TofuVersion
 	if err := h.db.First(&version, "id = ?", id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Terraform version not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Terraform version not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatTerraformVersion(&version)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatTerraformVersion(&version))
 }
 
 type createTerraformVersionRequest struct {
@@ -213,19 +199,19 @@ func (h *AdminTofuVersionsHandler) Create(c *gin.Context) {
 
 	var req createTerraformVersionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Invalid request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid request", err.Error())
 		return
 	}
 
 	if req.Data.Attributes.Version == "" {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "version is required"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusUnprocessableEntity, "version is required")
 		return
 	}
 
 	// Check uniqueness
 	var existing models.TofuVersion
 	if err := h.db.Where("version = ?", req.Data.Attributes.Version).First(&existing).Error; err == nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Version already exists", "detail": fmt.Sprintf("Terraform version %s already exists", req.Data.Attributes.Version)}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Version already exists", fmt.Sprintf("Terraform version %s already exists", req.Data.Attributes.Version))
 		return
 	}
 
@@ -272,11 +258,11 @@ func (h *AdminTofuVersionsHandler) Create(c *gin.Context) {
 	}
 
 	if err := h.db.Create(version).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Failed to create terraform version", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Failed to create terraform version", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": formatTerraformVersion(version)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatTerraformVersion(version))
 }
 
 type updateTerraformVersionRequest struct {
@@ -308,16 +294,16 @@ func (h *AdminTofuVersionsHandler) Update(c *gin.Context) {
 	var version models.TofuVersion
 	if err := h.db.First(&version, "id = ?", id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Terraform version not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Terraform version not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
 
 	var req updateTerraformVersionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Invalid request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid request", err.Error())
 		return
 	}
 
@@ -367,11 +353,11 @@ func (h *AdminTofuVersionsHandler) Update(c *gin.Context) {
 	}
 
 	if err := h.db.Save(&version).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Failed to update terraform version", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Failed to update terraform version", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatTerraformVersion(&version)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatTerraformVersion(&version))
 }
 
 // Delete a terraform version.
@@ -386,16 +372,16 @@ func (h *AdminTofuVersionsHandler) Delete(c *gin.Context) {
 	var version models.TofuVersion
 	if err := h.db.First(&version, "id = ?", id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Terraform version not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Terraform version not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
 
 	// Don't allow deleting official versions (like TFE)
 	if version.Official {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Cannot delete official OpenTofu version"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusUnprocessableEntity, "Cannot delete official OpenTofu version")
 		return
 	}
 
@@ -403,12 +389,12 @@ func (h *AdminTofuVersionsHandler) Delete(c *gin.Context) {
 	var count int64
 	h.db.Model(&models.Workspace{}).Where("tofu_version = ?", version.Version).Count(&count)
 	if count > 0 {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Cannot delete", "detail": fmt.Sprintf("Version %s is in use by %d workspace(s)", version.Version, count)}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Cannot delete", fmt.Sprintf("Version %s is in use by %d workspace(s)", version.Version, count))
 		return
 	}
 
 	if err := h.db.Delete(&version).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Failed to delete terraform version"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Failed to delete terraform version")
 		return
 	}
 
@@ -471,12 +457,12 @@ func (h *AdminTofuVersionsHandler) ListEnabled(c *gin.Context) {
 		`).
 		Find(&versions)
 
-	data := make([]gin.H, 0, len(versions))
+	data := make([]jsonapi.Resource[TofuVersionAttributes], 0, len(versions))
 	for _, v := range versions {
 		data = append(data, formatTerraformVersion(&v))
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewFullPageMeta(len(data)))
 }
 
 // filterValidArchs returns only archs with non-empty URLs.
@@ -507,53 +493,48 @@ func marshalArchs(archs []terraformVersionArch) *string {
 }
 
 // formatTerraformVersion formats a TerraformVersion as a JSON:API resource.
-func formatTerraformVersion(v *models.TofuVersion) gin.H {
+func formatTerraformVersion(v *models.TofuVersion) jsonapi.Resource[TofuVersionAttributes] {
 	// Return stored archs if they exist (user explicitly provided them).
 	// Otherwise return empty array - this prevents the provider's
 	// PreserveAMD64ArchsOnChange plan modifier from corrupting archs by
 	// setting url=null when url isn't in the user's config.
-	var archs []gin.H
+	// The stored archs already have the wire member names, so they are forwarded as-is
+	// rather than re-spelled.
+	var archs []terraformVersionArch
 	if v.ArchsJSON != nil && *v.ArchsJSON != "" {
 		var stored []terraformVersionArch
 		if err := json.Unmarshal([]byte(*v.ArchsJSON), &stored); err == nil {
-			for _, a := range stored {
-				archs = append(archs, gin.H{
-					"url":  a.URL,
-					"sha":  a.Sha,
-					"os":   a.OS,
-					"arch": a.Arch,
-				})
-			}
+			archs = append(archs, stored...)
 		}
 	}
 	if archs == nil {
-		archs = []gin.H{}
+		archs = []terraformVersionArch{}
 	}
 
-	attrs := gin.H{
-		"version":    v.Version,
-		"url":        v.URL,
-		"sha":        v.Sha,
-		"deprecated": v.Deprecated,
-		"official":   v.Official,
-		"enabled":    v.Enabled,
-		"beta":       v.Beta,
-		"usage":      v.Usage,
-		"created-at": v.CreatedAt.Format(time.RFC3339),
-		"archs":      archs,
+	attrs := TofuVersionAttributes{
+		Version:    v.Version,
+		URL:        v.URL,
+		Sha:        v.Sha,
+		Deprecated: v.Deprecated,
+		Official:   v.Official,
+		Enabled:    v.Enabled,
+		Beta:       v.Beta,
+		Usage:      v.Usage,
+		CreatedAt:  v.CreatedAt.Format(time.RFC3339),
+		Archs:      archs,
 	}
 	// Only include deprecated-reason when non-nil AND non-empty.
 	// The tfe provider always sends deprecated-reason="" even when user doesn't set it,
 	// but on read it maps nil → types.StringNull(). Including "" would cause:
 	// "was null, but now cty.StringVal("")" inconsistency.
 	if v.DeprecatedReason != nil && *v.DeprecatedReason != "" {
-		attrs["deprecated-reason"] = *v.DeprecatedReason
+		attrs.DeprecatedReason = *v.DeprecatedReason
 	}
 
-	return gin.H{
-		"id":         v.ID,
-		"type":       "terraform-versions",
-		"attributes": attrs,
+	return jsonapi.Resource[TofuVersionAttributes]{
+		ID:         v.ID,
+		Type:       "terraform-versions",
+		Attributes: attrs,
 	}
 }
 

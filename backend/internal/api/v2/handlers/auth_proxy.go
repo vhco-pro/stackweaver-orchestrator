@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/michielvha/logger"
 	"github.com/michielvha/stackweaver/backend/internal/api/middleware"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 )
 
 // NotificationMode controls how verification/OTP codes are delivered.
@@ -494,9 +495,9 @@ func (p *AuthProxy) IsBackchannelRevoked(sid string) bool {
 // uptime probes don't get confused; the consumer reads the JSON to make
 // a verdict.
 func (p *AuthProxy) HealthAuthProxy(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"backchannel_binding_active": p.config.ClientID != "",
-		"production_mode":            p.config.IsProduction,
+	c.JSON(http.StatusOK, BackchannelStatusResponse{
+		BackchannelBindingActive: p.config.ClientID != "",
+		ProductionMode:           p.config.IsProduction,
 	})
 }
 
@@ -717,10 +718,7 @@ func (p *AuthProxy) getFrontendBaseURL(c *gin.Context) string {
 
 // respondError sends a JSON error response matching Zitadel's error shape.
 func respondError(c *gin.Context, status int, message string) {
-	c.JSON(status, gin.H{
-		"code":    status,
-		"message": message,
-	})
+	jsonapi.WriteError(c, status, http.StatusText(status), message)
 }
 
 // --- Session cookie management (D6) ---
@@ -976,31 +974,31 @@ func (p *AuthProxy) Authorize(c *gin.Context) {
 		}
 
 		// Extract OIDC parameters from the original request to return to the SPA
-		response := gin.H{
-			"authRequest": authRequestID,
+		response := AuthorizeParamsResponse{
+			AuthRequest: authRequestID,
 		}
 
 		// Pass through relevant parameters the SPA needs
 		if loginHint := params.Get("login_hint"); loginHint != "" {
-			response["loginHint"] = loginHint
+			response.LoginHint = loginHint
 		}
 		if prompt := params.Get("prompt"); prompt != "" {
-			response["prompt"] = prompt
+			response.Prompt = prompt
 		}
 		if scope := params.Get("scope"); scope != "" {
-			response["scope"] = scope
+			response.Scope = scope
 		}
 
 		// Parse org scope from scope parameter or organization query param
 		if org := params.Get("organization"); org != "" {
-			response["organization"] = org
+			response.Organization = org
 		} else if scope := params.Get("scope"); scope != "" {
 			// Check for urn:zitadel:iam:org:id: or urn:zitadel:iam:org:domain:primary: scopes
 			for s := range strings.FieldsSeq(scope) {
 				if orgID, found := strings.CutPrefix(s, "urn:zitadel:iam:org:id:"); found {
-					response["organizationId"] = orgID
+					response.OrganizationID = orgID
 				} else if domain, found := strings.CutPrefix(s, "urn:zitadel:iam:org:domain:primary:"); found {
-					response["organizationDomain"] = domain
+					response.OrganizationDomain = domain
 				}
 			}
 		}
@@ -1155,7 +1153,7 @@ func (p *AuthProxy) EndSession(c *gin.Context) {
 			// Refuse the redirect - return a benign success body so
 			// the SPA can render its own logout-done page.
 			logger.Warnf("EndSession: refusing post-logout redirect to disallowed host (%q)", location)
-			c.JSON(http.StatusOK, gin.H{"loggedOut": true})
+			c.JSON(http.StatusOK, LoggedOutResponse{LoggedOut: true})
 			return
 		}
 	}
@@ -2143,10 +2141,7 @@ func (p *AuthProxy) UpdateSession(c *gin.Context) {
 			// is embedded in the key with the `decoy:` / bare
 			// namespace already prefixed by the caller.
 			logger.Warnf("event=loginname_lockout_denied key=%q reason=too_many_failed_password_attempts", limiterKey)
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"code":    http.StatusTooManyRequests,
-				"message": "too many failed password attempts - try again later",
-			})
+			jsonapi.WriteError(c, http.StatusTooManyRequests, http.StatusText(http.StatusTooManyRequests), "too many failed password attempts - try again later")
 			return
 		}
 	}
@@ -2378,7 +2373,7 @@ func (p *AuthProxy) SearchSessions(c *gin.Context) {
 
 	entries := p.readSessionCookie(c)
 	if len(entries) == 0 {
-		c.JSON(http.StatusOK, gin.H{"sessions": []any{}})
+		c.JSON(http.StatusOK, SessionsPassthroughResponse{Sessions: []any{}})
 		return
 	}
 
@@ -2636,7 +2631,7 @@ func (p *AuthProxy) ListIdpProviders(c *gin.Context) {
 		return
 	}
 	if len(wrapper.IdentityProviders) == 0 {
-		c.JSON(http.StatusOK, gin.H{"result": []any{}})
+		c.JSON(http.StatusOK, ResultPassthroughResponse{Result: []any{}})
 		return
 	}
 	c.Data(http.StatusOK, "application/json",
@@ -3426,11 +3421,11 @@ func (p *AuthProxy) LookupOrgByDomain(c *gin.Context) {
 	// Cache the filtered response so subsequent probes for the same
 	// domain hit the cache. Empty results are also cached - the whole
 	// point of the negative-result amortisation.
-	respBytes, err := json.Marshal(gin.H{"result": out})
+	respBytes, err := json.Marshal(ResultPassthroughResponse{Result: out})
 	if err != nil {
 		// Marshal failure on a fully-typed map should never happen.
 		// Fall through to direct response without caching.
-		c.JSON(http.StatusOK, gin.H{"result": out})
+		c.JSON(http.StatusOK, ResultPassthroughResponse{Result: out})
 		return
 	}
 	p.settingsCache.set(cacheKey, respBytes, lookupOrgByDomainTTL)
@@ -3555,4 +3550,28 @@ func (p *AuthProxy) fetchSessionUserID(ctx context.Context, sessionID string) st
 		return ""
 	}
 	return parsed.Session.Factors.User.ID
+}
+
+// BackchannelStatusResponse reports the back-channel logout binding state.
+type BackchannelStatusResponse struct {
+	BackchannelBindingActive bool `json:"backchannel_binding_active"`
+	ProductionMode           bool `json:"production_mode"`
+}
+
+// LoggedOutResponse acknowledges a logout.
+type LoggedOutResponse struct {
+	LoggedOut bool `json:"loggedOut"`
+}
+
+// SessionsPassthroughResponse wraps sessions proxied from Zitadel.
+//
+// Sessions is `any` because this endpoint forwards Zitadel's own payload unaltered; giving it
+// a concrete type here would be inventing a contract Stackweaver does not own.
+type SessionsPassthroughResponse struct {
+	Sessions any `json:"sessions"`
+}
+
+// ResultPassthroughResponse wraps a proxied Zitadel result, for the same reason.
+type ResultPassthroughResponse struct {
+	Result any `json:"result"`
 }

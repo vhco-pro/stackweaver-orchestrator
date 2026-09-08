@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -44,16 +45,12 @@ func NewGroupHandler(
 func (h *GroupHandler) authorizeGroup(c *gin.Context, groupID uuid.UUID, write bool) (*models.AnsibleInventoryGroup, bool) {
 	group, err := h.inventoryService.GetGroup(groupID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Group not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Group not found")
 		return nil, false
 	}
 	inventory, err := h.inventoryService.GetInventory(group.InventoryID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Inventory not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return nil, false
 	}
 	if !authorizeInventoryResource(c, h.authService, h.rbacService, inventory, write) {
@@ -67,9 +64,7 @@ func (h *GroupHandler) authorizeGroup(c *gin.Context, groupID uuid.UUID, write b
 func (h *GroupHandler) authorizeInventoryByID(c *gin.Context, inventoryID uuid.UUID, write bool) bool {
 	inventory, err := h.inventoryService.GetInventory(inventoryID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Inventory not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return false
 	}
 	return authorizeInventoryResource(c, h.authService, h.rbacService, inventory, write)
@@ -121,11 +116,7 @@ func (h *GroupHandler) List(c *gin.Context) {
 	inventoryIDStr := c.Param("id")
 	inventoryID, err := uuid.Parse(inventoryIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -142,25 +133,11 @@ func (h *GroupHandler) List(c *gin.Context) {
 
 	groups, total, err := h.inventoryService.ListGroups(inventoryID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list groups"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list groups")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatGroupsResponse(groups),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatGroupsResponse(groups), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // Create creates a new group in an inventory
@@ -169,11 +146,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 	inventoryIDStr := c.Param("id")
 	inventoryID, err := uuid.Parse(inventoryIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -183,11 +156,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 
 	var req CreateGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -195,11 +164,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 	if req.Data.Relationships.Parent.Data != nil {
 		pid, err := uuid.Parse(req.Data.Relationships.Parent.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid parent group ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid parent group ID")
 			return
 		}
 		parentID = &pid
@@ -213,17 +178,11 @@ func (h *GroupHandler) Create(c *gin.Context) {
 		parentID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatGroupResponse(group),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatGroupResponse(group))
 }
 
 // Get retrieves a group by ID
@@ -232,11 +191,7 @@ func (h *GroupHandler) Get(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid group ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid group ID")
 		return
 	}
 
@@ -245,9 +200,7 @@ func (h *GroupHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatGroupResponse(group),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatGroupResponse(group))
 }
 
 // Update updates a group
@@ -256,11 +209,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid group ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid group ID")
 		return
 	}
 
@@ -270,11 +219,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 
 	var req UpdateGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -282,11 +227,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 	if req.Data.Relationships.Parent.Data != nil {
 		pid, err := uuid.Parse(req.Data.Relationships.Parent.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid parent group ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid parent group ID")
 			return
 		}
 		parentID = &pid
@@ -301,17 +242,11 @@ func (h *GroupHandler) Update(c *gin.Context) {
 		false, // Don't clear parent unless explicitly requested
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatGroupResponse(group),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatGroupResponse(group))
 }
 
 // Delete deletes a group
@@ -320,11 +255,7 @@ func (h *GroupHandler) Delete(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid group ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid group ID")
 		return
 	}
 
@@ -333,11 +264,7 @@ func (h *GroupHandler) Delete(c *gin.Context) {
 	}
 
 	if err := h.inventoryService.DeleteGroup(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -345,64 +272,44 @@ func (h *GroupHandler) Delete(c *gin.Context) {
 }
 
 // formatGroupResponse formats a group for JSON:API response
-func formatGroupResponse(group *models.AnsibleInventoryGroup) gin.H {
-	hosts := make([]gin.H, len(group.Hosts))
+func formatGroupResponse(group *models.AnsibleInventoryGroup) jsonapi.Resource[GroupAttributes] {
+	hosts := make([]jsonapi.ResourceID, len(group.Hosts))
 	for i, host := range group.Hosts {
-		hosts[i] = gin.H{
-			"id":   host.ID.String(),
-			"type": "ansible-hosts",
-		}
+		hosts[i] = jsonapi.ResourceID{ID: host.ID.String(), Type: "ansible-hosts"}
 	}
 
-	children := make([]gin.H, len(group.Children))
+	children := make([]jsonapi.ResourceID, len(group.Children))
 	for i, child := range group.Children {
-		children[i] = gin.H{
-			"id":   child.ID.String(),
-			"type": "ansible-groups",
-		}
+		children[i] = jsonapi.ResourceID{ID: child.ID.String(), Type: "ansible-groups"}
 	}
 
-	relationships := gin.H{
-		"inventory": gin.H{
-			"data": gin.H{
-				"id":   group.InventoryID.String(),
-				"type": "ansible-inventories",
-			},
-		},
-		"hosts": gin.H{
-			"data": hosts,
-		},
-		"children": gin.H{
-			"data": children,
-		},
+	relationships := GroupRelationships{
+		Inventory: jsonapi.ToOne(group.InventoryID.String(), "ansible-inventories"),
+		Hosts:     jsonapi.ManyRelationship{Data: hosts},
+		Children:  jsonapi.ManyRelationship{Data: children},
 	}
-
 	if group.ParentID != nil {
-		relationships["parent"] = gin.H{
-			"data": gin.H{
-				"id":   group.ParentID.String(),
-				"type": "ansible-groups",
-			},
-		}
+		r := jsonapi.ToOne(group.ParentID.String(), "ansible-groups")
+		relationships.Parent = &r
 	}
 
-	return gin.H{
-		"id":   group.ID.String(),
-		"type": "ansible-groups",
-		"attributes": gin.H{
-			"name":        group.Name,
-			"description": group.Description,
-			"variables":   group.Variables,
-			"created-at":  group.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			"updated-at":  group.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+	return jsonapi.Resource[GroupAttributes]{
+		ID:   group.ID.String(),
+		Type: "ansible-groups",
+		Attributes: GroupAttributes{
+			Name:        group.Name,
+			Description: group.Description,
+			Variables:   group.Variables,
+			CreatedAt:   group.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:   group.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		},
-		"relationships": relationships,
+		Relationships: relationships,
 	}
 }
 
 // formatGroupsResponse formats multiple groups for JSON:API response
-func formatGroupsResponse(groups []models.AnsibleInventoryGroup) []gin.H {
-	result := make([]gin.H, len(groups))
+func formatGroupsResponse(groups []models.AnsibleInventoryGroup) []jsonapi.Resource[GroupAttributes] {
+	result := make([]jsonapi.Resource[GroupAttributes], len(groups))
 	for i, group := range groups {
 		result[i] = formatGroupResponse(&group)
 	}

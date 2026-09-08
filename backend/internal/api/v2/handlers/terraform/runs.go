@@ -21,6 +21,7 @@ import (
 	"github.com/michielvha/logger"
 	"github.com/michielvha/stackweaver/backend/internal/api/pagination"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/apierror"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/crypto"
@@ -226,9 +227,9 @@ func resolveRunOperation(req *CreateRunRequestV2) (operation models.RunOperation
 // Based on TFE API spec: https://developer.hashicorp.com/terraform/enterprise/api-docs/run
 // c is optional - if provided, will use auth_method from context to determine source
 // runRepo is optional - if provided, will check for existing apply runs to determine can-apply
-func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repository.ConfigurationVersionRepository, runRepo *repository.RunRepository) gin.H {
+func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repository.ConfigurationVersionRepository, runRepo *repository.RunRepository) jsonapi.Resource[RunAttributes] {
 	// Build status-timestamps (TFE requires these for Terraform CLI to recognize completion)
-	statusTimestamps := gin.H{}
+	var statusTimestamps RunStatusTimestamps
 
 	// Set status-timestamps based on run operation type and status
 	switch run.Operation {
@@ -236,35 +237,35 @@ func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repos
 		// Plan-and-apply runs: planning → planned → applying → applied
 		// planning-at: when plan started
 		if run.StartedAt != nil {
-			statusTimestamps["planning-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlanningAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// planned-at: when plan phase completed
 		// Include even when status is 'failed' if PlanCompletedAt is set (plan completed before apply failed)
 		if run.PlanCompletedAt != nil {
-			statusTimestamps["planned-at"] = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlannedAt = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// applying-at: when apply phase started
 		// Include even when status is 'failed' if ApplyStartedAt is set (apply started before it failed)
 		if run.ApplyStartedAt != nil {
-			statusTimestamps["applying-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.ApplyingAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// applied-at: when apply phase completed (status is 'applied')
 		if run.Status == models.RunStatusApplied && run.CompletedAt != nil {
-			statusTimestamps["applied-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.AppliedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 
 	case models.RunOperationPlanOnly:
 		// Plan-only runs: planning → planned
 		// planning-at: when plan started
 		if run.StartedAt != nil {
-			statusTimestamps["planning-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlanningAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// planned-at: when plan completed (status is 'planned' or 'completed')
 		if run.Status == models.RunStatusPlanned || run.Status == models.RunStatusCompleted {
 			if run.PlanCompletedAt != nil {
-				statusTimestamps["planned-at"] = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
+				statusTimestamps.PlannedAt = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
 			} else if run.CompletedAt != nil {
-				statusTimestamps["planned-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+				statusTimestamps.PlannedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 			}
 		}
 
@@ -272,19 +273,19 @@ func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repos
 		// TFE-compatible: Destroy runs follow the same two-phase flow as plan-and-apply
 		// planning-at: when destroy plan started
 		if run.StartedAt != nil {
-			statusTimestamps["planning-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlanningAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// planned-at: when destroy plan completed
 		if run.PlanCompletedAt != nil {
-			statusTimestamps["planned-at"] = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlannedAt = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// applying-at: when destroy execution started (apply phase)
 		if run.ApplyStartedAt != nil {
-			statusTimestamps["applying-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.ApplyingAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 		// applied-at: when destroy execution completed
 		if run.Status == models.RunStatusApplied && run.CompletedAt != nil {
-			statusTimestamps["applied-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.AppliedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 
@@ -295,14 +296,14 @@ func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repos
 			// For plan-and-apply, check if we're past the plan phase
 			if len(run.PlanOutput) > 0 {
 				// Plan completed, so this must be applying
-				statusTimestamps["applying-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+				statusTimestamps.ApplyingAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 			} else {
 				// Plan phase
-				statusTimestamps["planning-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+				statusTimestamps.PlanningAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 			}
 		} else {
 			// Plan-only or legacy plan
-			statusTimestamps["planning-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlanningAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 	if (run.Status == models.RunStatusCompleted || run.Status == models.RunStatusPlanned) && run.CompletedAt != nil {
@@ -312,17 +313,17 @@ func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repos
 			// If plan output exists but status is completed, it might be apply completion
 			// For now, assume it's plan completion if status is "planned"
 			if run.Status == models.RunStatusPlanned {
-				statusTimestamps["planned-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+				statusTimestamps.PlannedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 			}
 		} else {
 			// Plan-only or legacy: set planned-at
-			statusTimestamps["planned-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			statusTimestamps.PlannedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 
 	// Set plan-queued-at when run is pending (queued for planning)
 	if run.Status == models.RunStatusPending {
-		statusTimestamps["plan-queued-at"] = run.CreatedAt.Format("2006-01-02T15:04:05Z")
+		statusTimestamps.PlanQueuedAt = run.CreatedAt.Format("2006-01-02T15:04:05Z")
 	}
 
 	// TFE-compatible: Determine run source based on TFE spec
@@ -400,131 +401,92 @@ func formatRunResponse(run *models.Run, c *gin.Context, configVersionRepo *repos
 	// We keep status as-is from database (should be "completed" for completed plan runs, not "planned")
 	apiStatus := string(run.Status)
 
-	attributes := gin.H{
-		"status":            apiStatus,
-		"operation":         string(run.Operation), // TFE-compatible: Include operation in attributes
-		"is-destroy":        run.Operation == models.RunOperationDestroy,
-		"plan-only":         planOnly, // TFE-compatible: Indicates if run is plan-only (cannot be applied)
-		"message":           "",
-		"source":            runSource, // TFE-compatible: "tfe-api", "tfe-ui", "tfe-configuration-version" (TFE only has these 3 sources)
-		"created-at":        run.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":        run.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		"status-timestamps": statusTimestamps,
-		"has-changes":       hasChanges(run), // Set based on plan output
-		"actions": gin.H{
-			"is-cancelable": run.Status == models.RunStatusRunning || run.Status == models.RunStatusPending || run.Status == models.RunStatusPlanning || run.Status == models.RunStatusApplying ||
+	attributes := RunAttributes{
+		Status:    apiStatus,
+		Operation: string(run.Operation),
+		IsDestroy: run.Operation == models.RunOperationDestroy,
+		PlanOnly:  planOnly,
+		Source:    runSource, // "tfe-api", "tfe-ui", "tfe-configuration-version" - TFE's only three
+		CreatedAt: run.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt: run.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		// TFE requires status-timestamps for the Terraform CLI to recognise completion.
+		StatusTimestamps: statusTimestamps,
+		HasChanges:       hasChanges(run),
+		Actions: RunActions{
+			IsCancelable: run.Status == models.RunStatusRunning || run.Status == models.RunStatusPending || run.Status == models.RunStatusPlanning || run.Status == models.RunStatusApplying ||
 				run.Status == models.RunStatusPrePlanRunning || run.Status == models.RunStatusPostPlanRunning || run.Status == models.RunStatusPreApplyRunning || run.Status == models.RunStatusPostApplyRunning,
-			// TFE-compatible: a plan-and-apply/destroy run waiting at `planned` is confirmable (apply-able).
-			// go-tfe clients (e.g. tfe_workspace_run) poll actions.is-confirmable to know when to confirm
-			// the apply; it mirrors permissions.can-apply. Was hardcoded false, which hung those clients.
-			"is-confirmable":      canApply,
-			"is-discardable":      run.Status == models.RunStatusPending,
-			"is-force-cancelable": false,
+			// A plan-and-apply/destroy run waiting at `planned` is confirmable; mirrors
+			// permissions.can-apply. Was hardcoded false, which hung go-tfe pollers.
+			IsConfirmable: canApply,
+			IsDiscardable: run.Status == models.RunStatusPending,
 		},
-		"permissions": gin.H{
-			"can-apply":         canApply, // TFE-compatible: Only true if run is completed, plan operation, not plan-only, and not auto-applied
-			"can-cancel":        true,
-			"can-discard":       true,
-			"can-force-execute": false,
-			"can-force-cancel":  false,
+		Permissions: RunPermissions{
+			CanApply:   canApply, // completed plan phase, apply-able operation, not auto-applied
+			CanCancel:  true,
+			CanDiscard: true,
 		},
 	}
 
-	// Include configuration version details for context-aware display
-	// This allows frontend to show "Triggered via CLI", "Triggered via UI", or "Triggered via VCS" with commit info
+	// Configuration-version context for the frontend's "Triggered via CLI/UI/VCS" display.
 	if configVersion != nil {
-		attributes["configuration-version-source"] = configVersion.Source // "tfe-vcs", "tfe-cli", "tfe-ui", "tfe-api"
-		if configVersion.CommitHash != "" {
-			attributes["commit-hash"] = configVersion.CommitHash
-		}
-		if configVersion.Committer != "" {
-			attributes["committer"] = configVersion.Committer
-		}
+		attributes.ConfigurationVersionSource = configVersion.Source // "tfe-vcs", "tfe-cli", "tfe-ui", "tfe-api"
+		attributes.CommitHash = configVersion.CommitHash
+		attributes.Committer = configVersion.Committer
 		if configVersion.PRNumber > 0 {
-			attributes["pr-number"] = configVersion.PRNumber
+			attributes.PRNumber = configVersion.PRNumber
 		}
-		if configVersion.SourceBranch != "" {
-			attributes["source-branch"] = configVersion.SourceBranch
-		}
+		attributes.SourceBranch = configVersion.SourceBranch
 	}
 
-	// Add optional timestamp fields
 	if run.StartedAt != nil {
-		attributes["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+		attributes.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 	}
 	if run.CompletedAt != nil {
-		attributes["completed-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+		attributes.CompletedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 	}
-	if run.ErrorMessage != "" {
-		attributes["error-message"] = run.ErrorMessage
-	}
+	attributes.ErrorMessage = run.ErrorMessage
 
 	// Self-hosted runner info
 	if run.AgentPoolID != nil {
-		attributes["agent-pool-id"] = run.AgentPoolID.String()
+		attributes.AgentPoolID = run.AgentPoolID.String()
 		if run.AgentPool != nil {
-			attributes["agent-pool-name"] = run.AgentPool.Name
+			attributes.AgentPoolName = run.AgentPool.Name
 		}
 	}
 	if run.RunnerID != nil {
-		attributes["runner-id"] = run.RunnerID.String()
+		attributes.RunnerID = run.RunnerID.String()
 		if run.Runner != nil {
-			attributes["runner-name"] = run.Runner.Name
+			attributes.RunnerName = run.Runner.Name
 		}
 	}
 
-	// TFE-compatible: Plan output is NOT included in run response
-	// Frontend should fetch from /api/v2/runs/:id/plan endpoint instead
-	// This improves scalability and matches TFE behavior
+	// TFE-compatible: plan output is NOT included here; the frontend fetches /runs/:id/plan.
 
 	// Build relationships
-	relationships := gin.H{
-		"workspace": gin.H{
-			"data": gin.H{
-				"id":   run.WorkspaceID,
-				"type": "workspaces",
-			},
-		},
+	relationships := RunRelationships{
+		Workspace: jsonapi.ToOne(run.WorkspaceID, "workspaces"),
 	}
-
 	if run.ConfigurationVersionID != nil {
-		relationships["configuration-version"] = gin.H{
-			"data": gin.H{
-				"id":   *run.ConfigurationVersionID,
-				"type": "configuration-versions",
-			},
-		}
+		r := jsonapi.ToOne(*run.ConfigurationVersionID, "configuration-versions")
+		relationships.ConfigurationVersion = &r
 	}
-
-	// TFE requires a "plan" relationship for runs
-	// For plan operations, the plan ID is typically the same as the run ID
-	// For plan-and-apply and plan-only runs, include plan relationship
-	// For destroy runs, also include plan relationship (destroy uses plan phase)
+	// TFE requires a "plan" relationship for every plan-bearing operation (destroy included);
+	// plan id equals run id by design.
 	if run.Operation == models.RunOperationPlanAndApply || run.Operation == models.RunOperationPlanOnly || run.Operation == models.RunOperationDestroy {
-		relationships["plan"] = gin.H{
-			"data": gin.H{
-				"id":   run.ID, // Plan ID = run ID
-				"type": "plans",
-			},
-		}
+		r := jsonapi.ToOne(run.ID, "plans")
+		relationships.Plan = &r
 	}
-
-	// TFE requires an "apply" relationship for plan-and-apply runs that have started apply phase
-	// Apply ID = Run ID (same pattern as Plan ID = Run ID)
+	// An "apply" relationship once the apply phase has started; apply id equals run id.
 	if run.Operation == models.RunOperationPlanAndApply && run.ApplyStartedAt != nil {
-		relationships["apply"] = gin.H{
-			"data": gin.H{
-				"id":   run.ID, // Apply ID = run ID
-				"type": "applies",
-			},
-		}
+		r := jsonapi.ToOne(run.ID, "applies")
+		relationships.Apply = &r
 	}
 
-	return gin.H{
-		"id":            run.ID,
-		"type":          "runs",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return jsonapi.Resource[RunAttributes]{
+		ID:            run.ID,
+		Type:          "runs",
+		Attributes:    attributes,
+		Relationships: relationships,
 	}
 }
 
@@ -606,29 +568,13 @@ func hasChanges(run *models.Run) bool {
 func (h *RunHandlerV2) Create(c *gin.Context) {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	var req CreateRunRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -640,15 +586,7 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 	case req.WorkspaceID != "":
 		workspaceID = req.WorkspaceID
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Workspace ID is required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Workspace ID is required")
 		return
 	}
 
@@ -665,30 +603,14 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 	// operation + auto-apply-after-plan as fallbacks.
 	operation, autoApplyAfterPlan, perRunAutoApply, legacyOperation := resolveRunOperation(&req)
 	if legacyOperation {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Legacy 'plan' and 'apply' operations are no longer supported. Use 'plan-only' or 'plan-and-apply' instead.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Legacy 'plan' and 'apply' operations are no longer supported. Use 'plan-only' or 'plan-and-apply' instead.")
 		return
 	}
 
 	// Verify workspace exists and get it
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -705,15 +627,7 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 		&workspace.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	// Also check workspace write permission - viewers don't have this
@@ -726,43 +640,19 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 		&workspace.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	// Both permissions required - viewers have neither PermissionRuns nor PermissionWorkspaceWrite
 	if !hasRunsPermission || !hasWorkspaceWrite {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "You do not have permission to create runs in this workspace. Viewers can only view runs, not create or plan them.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create runs in this workspace. Viewers can only view runs, not create or plan them.")
 		return
 	}
 
 	// Check if workspace is manually locked
 	// If locked, new runs cannot be created until user unlocks it
 	if workspace.Locked {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Workspace is locked. Unlock the workspace to create new runs.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace is locked. Unlock the workspace to create new runs.")
 		return
 	}
 
@@ -778,15 +668,7 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 		vcsConn, err := h.vcsConnectionRepo.GetByID(*workspace.VCSConnectionID)
 		if err != nil {
 			logger.Infof("Run creation: Failed to get VCS connection: %v", err)
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "Failed to get VCS connection for workspace",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Failed to get VCS connection for workspace")
 			return
 		}
 
@@ -837,9 +719,7 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 				existingRun.Operation == operation &&
 				(existingRun.Status == models.RunStatusPending || existingRun.Status == models.RunStatusRunning) {
 				logger.Infof("Detected potential duplicate run creation for workspace %s, operation %s (existing run %s is %s). Returning existing run.", workspaceID, operation, existingRun.ID, existingRun.Status)
-				c.JSON(http.StatusCreated, gin.H{
-					"data": formatRunResponse(&existingRun, c, h.configVersionRepo, h.runRepo),
-				})
+				jsonapi.WriteDocument(c, http.StatusCreated, formatRunResponse(&existingRun, c, h.configVersionRepo, h.runRepo))
 				return
 			}
 		}
@@ -879,43 +759,23 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 			if err2 == nil && len(recentRuns) > 0 {
 				latestRun := recentRuns[0]
 				logger.Infof("Run creation failed due to duplicate, returning existing run %s.", latestRun.ID)
-				c.JSON(http.StatusCreated, gin.H{
-					"data": formatRunResponse(&latestRun, c, h.configVersionRepo, h.runRepo),
-				})
+				jsonapi.WriteDocument(c, http.StatusCreated, formatRunResponse(&latestRun, c, h.configVersionRepo, h.runRepo))
 				return
 			}
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to create run",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create run")
 		return
 	}
 
 	// Reload run to ensure all fields are populated
 	run, err = h.runRepo.GetByID(run.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to retrieve created run",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to retrieve created run")
 		return
 	}
 
 	// TFE-compatible response format
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatRunResponse(run, c, h.configVersionRepo, h.runRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatRunResponse(run, c, h.configVersionRepo, h.runRepo))
 }
 
 // authorizeRun loads a run by ID and enforces the caller's run permission at the
@@ -927,37 +787,27 @@ func (h *RunHandlerV2) Create(c *gin.Context) {
 // (nil, false) otherwise.
 func (h *RunHandlerV2) authorizeRun(c *gin.Context, runID, level string) (*models.Run, bool) {
 	if runID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid run ID"}},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid run ID")
 		return nil, false
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return nil, false
 	}
 	run, err := h.runRepo.GetByID(runID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Run not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Run not found")
 		return nil, false
 	}
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return nil, false
 	}
 	allowed, err := h.rbacService.CheckRunPermission(c.Request.Context(), user.ID, run.WorkspaceID, workspace.ProjectID, level)
 	if err != nil || !allowed {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to " + level + " this run"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to "+level+" this run")
 		return nil, false
 	}
 	return run, true
@@ -972,9 +822,7 @@ func (h *RunHandlerV2) Get(c *gin.Context) {
 	}
 
 	// TFE-compatible response format
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatRunResponse(run, c, h.configVersionRepo, h.runRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatRunResponse(run, c, h.configVersionRepo, h.runRepo))
 }
 
 // GetOutputs returns outputs from the state version created by this run (TFE-aligned).
@@ -983,66 +831,42 @@ func (h *RunHandlerV2) Get(c *gin.Context) {
 func (h *RunHandlerV2) GetOutputs(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid run ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid run ID")
 		return
 	}
 
 	run, err := h.runRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Run not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Run not found")
 		return
 	}
 
 	version, err := h.stateVersionRepo.GetByRunID(id)
 	if err != nil || version == nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "No state version for this run"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "No state version for this run")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Workspace not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	ok, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, version.WorkspaceID, workspace.ProjectID, "read-outputs")
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "Insufficient permissions to view run outputs"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view run outputs")
 		return
 	}
 
 	outputs := materializedOutputs(h.stateOutputRepo, version, true, h.cryptoSvc)
-	c.JSON(http.StatusOK, gin.H{"data": outputs})
+	jsonapi.WriteDocument(c, http.StatusOK, outputs)
 }
 
 // ListTaskStages (GET /api/v2/runs/:id/task-stages) lives in task_stages.go with the rest of the
@@ -1138,7 +962,7 @@ func (h *RunHandlerV2) GetPlan(c *gin.Context) {
 	// Determine plan status according to TFE Plans API spec
 	// Status values: pending, managed_queued/queued, running, errored, canceled, finished, unreachable
 	planStatus := "pending"
-	planStatusTimestamps := gin.H{}
+	var planStatusTimestamps PhaseStatusTimestamps
 
 	switch run.Status {
 	case models.RunStatusPending:
@@ -1146,7 +970,7 @@ func (h *RunHandlerV2) GetPlan(c *gin.Context) {
 	case models.RunStatusPlanning:
 		planStatus = "running"
 		if run.StartedAt != nil {
-			planStatusTimestamps["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusPrePlanRunning, models.RunStatusPrePlanCompleted:
 		planStatus = "pending" // pre_plan run tasks execute before the plan starts
@@ -1158,23 +982,23 @@ func (h *RunHandlerV2) GetPlan(c *gin.Context) {
 		// execute after it. go-tfe/terraform wait on the plan document reaching "finished".
 		planStatus = "finished" // TFE uses "finished" for completed plans
 		if run.PlanCompletedAt != nil {
-			planStatusTimestamps["finished-at"] = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.FinishedAt = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		if run.StartedAt != nil {
-			planStatusTimestamps["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusApplying:
 		planStatus = "running" // Apply phase is still running
 		if run.ApplyStartedAt != nil {
-			planStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusApplied:
 		planStatus = "finished"
 		if run.CompletedAt != nil {
-			planStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		if run.ApplyStartedAt != nil {
-			planStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusFailed:
 		planStatus = "errored"
@@ -1183,49 +1007,46 @@ func (h *RunHandlerV2) GetPlan(c *gin.Context) {
 	case models.RunStatusRunning:
 		planStatus = "running"
 		if run.StartedAt != nil {
-			planStatusTimestamps["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusCompleted:
 		planStatus = "finished" // TFE uses "finished" for completed plans, not "completed" or "planned"
 		if run.CompletedAt != nil {
-			planStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		if run.StartedAt != nil {
-			planStatusTimestamps["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			planStatusTimestamps.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 
 	// Set queued-at and pending-at timestamps
 	if run.Status == models.RunStatusPending {
-		planStatusTimestamps["pending-at"] = run.CreatedAt.Format("2006-01-02T15:04:05Z")
-		planStatusTimestamps["queued-at"] = run.CreatedAt.Format("2006-01-02T15:04:05Z")
+		planStatusTimestamps.PendingAt = run.CreatedAt.Format("2006-01-02T15:04:05Z")
+		planStatusTimestamps.QueuedAt = run.CreatedAt.Format("2006-01-02T15:04:05Z")
 	} else if run.StartedAt != nil {
 		// If run has started, set queued-at to created-at (when it was queued)
-		planStatusTimestamps["queued-at"] = run.CreatedAt.Format("2006-01-02T15:04:05Z")
-		planStatusTimestamps["pending-at"] = run.CreatedAt.Format("2006-01-02T15:04:05Z")
+		planStatusTimestamps.QueuedAt = run.CreatedAt.Format("2006-01-02T15:04:05Z")
+		planStatusTimestamps.PendingAt = run.CreatedAt.Format("2006-01-02T15:04:05Z")
 	}
 
 	// Determine has-changes based on resource and output counts
 	hasChanges := resourceAdditions > 0 || resourceChanges > 0 || resourceDestructions > 0 || outputChangeCount > 0
 
-	attributes := gin.H{
-		"execution-details": gin.H{
-			"mode": "remote", // TFE execution mode: remote, local, or agent
-		},
-		"generated-configuration": false,
-		"has-changes":             hasChanges,
-		"resource-additions":      resourceAdditions,
-		"resource-changes":        resourceChanges,
-		"resource-destructions":   resourceDestructions,
-		"resource-imports":        resourceImports,
-		"status":                  planStatus,
-		"status-timestamps":       planStatusTimestamps,
+	attributes := PlanAttributes{
+		ExecutionDetails:     ExecutionDetails{Mode: "remote"},
+		HasChanges:           hasChanges,
+		ResourceAdditions:    resourceAdditions,
+		ResourceChanges:      resourceChanges,
+		ResourceDestructions: resourceDestructions,
+		ResourceImports:      resourceImports,
+		Status:               planStatus,
+		StatusTimestamps:     planStatusTimestamps,
 	}
 
-	// TFE-compatible: Include plan JSON output in attributes for frontend
-	// The plan JSON contains resource_changes, planned_values, etc.
+	// TFE-compatible: the plan JSON (resource_changes, planned_values, ...) rides along for the
+	// frontend when present.
 	if len(run.PlanOutput) > 0 {
-		attributes["plan-json"] = run.PlanOutput
+		attributes.PlanJSON = run.PlanOutput
 	}
 
 	// TFE-compatible: log-read-url should be an absolute URL
@@ -1248,32 +1069,17 @@ func (h *RunHandlerV2) GetPlan(c *gin.Context) {
 	// bearer token (which would leak into proxy logs / history). The CLI still prefers its
 	// Authorization header; the query token is the TFE-compatible fallback. If no scoped token can
 	// be minted (no user in context / signing disabled) the URL is emitted without a token.
-	attributes["log-read-url"] = buildLogReadURL(c, scheme, host, run.ID, "")
+	attributes.LogReadURL = buildLogReadURL(c, scheme, host, run.ID, "")
 
-	// Build relationships and links according to TFE Plans API spec
-	// TFE Plans API requires relationships.state-versions and links (self, json-output)
-	relationships := gin.H{
-		"state-versions": gin.H{
-			"data": []gin.H{}, // Empty array - state versions are linked separately
-		},
-	}
-
-	// Build absolute URLs for links
-	planSelfURL := fmt.Sprintf("%s://%s/api/v2/plans/%s", scheme, host, run.ID)
-	planJSONOutputURL := fmt.Sprintf("%s://%s/api/v2/plans/%s/json-output", scheme, host, run.ID)
-
-	links := gin.H{
-		"self":        planSelfURL,
-		"json-output": planJSONOutputURL,
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"id":            run.ID,
-			"type":          "plans",
-			"attributes":    attributes,
-			"relationships": relationships,
-			"links":         links,
+	// TFE Plans API requires relationships.state-versions and links (self, json-output).
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[PlanAttributes]{
+		ID:            run.ID,
+		Type:          "plans",
+		Attributes:    attributes,
+		Relationships: PhaseRelationships{StateVersions: jsonapi.ManyRelationship{Data: []jsonapi.ResourceID{}}},
+		Links: PlanLinks{
+			Self:       fmt.Sprintf("%s://%s/api/v2/plans/%s", scheme, host, run.ID),
+			JSONOutput: fmt.Sprintf("%s://%s/api/v2/plans/%s/json-output", scheme, host, run.ID),
 		},
 	})
 }
@@ -1306,15 +1112,7 @@ func (h *RunHandlerV2) GetApply(c *gin.Context) {
 
 	// Plan-and-apply and destroy runs have apply phases (destroy uses same two-phase flow)
 	if !runHasApplyPhase(run.Operation) {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Apply not found (only plan-and-apply and destroy runs have apply phases)",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Apply not found (only plan-and-apply and destroy runs have apply phases)")
 		return
 	}
 
@@ -1379,7 +1177,7 @@ func (h *RunHandlerV2) GetApply(c *gin.Context) {
 	// Determine apply status according to TFE Applies API spec
 	// Status values: pending, queued, running, finished, errored, canceled, unreachable
 	applyStatus := "pending"
-	applyStatusTimestamps := gin.H{}
+	var applyStatusTimestamps PhaseStatusTimestamps
 
 	switch run.Status {
 	case models.RunStatusPending:
@@ -1396,45 +1194,45 @@ func (h *RunHandlerV2) GetApply(c *gin.Context) {
 		// The apply itself finished; only informational post-apply tasks are still running.
 		applyStatus = "finished"
 		if run.ApplyStartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusRunning:
 		applyStatus = "running"
 		if run.ApplyStartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		} else if run.StartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.StartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.StartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusCompleted:
 		applyStatus = "finished"
 		if run.CompletedAt != nil {
-			applyStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		if run.ApplyStartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusFailed:
 		applyStatus = "errored"
 		if run.CompletedAt != nil {
-			applyStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusCancelled:
 		applyStatus = "canceled"
 		if run.CompletedAt != nil {
-			applyStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusApplying:
 		applyStatus = "running"
 		if run.ApplyStartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	case models.RunStatusApplied:
 		applyStatus = "finished"
 		if run.CompletedAt != nil {
-			applyStatusTimestamps["finished-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.FinishedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 		}
 		if run.ApplyStartedAt != nil {
-			applyStatusTimestamps["started-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.StartedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 
@@ -1443,50 +1241,40 @@ func (h *RunHandlerV2) GetApply(c *gin.Context) {
 		// queued-at is when apply was queued (before started-at)
 		// For plan-and-apply runs, this is when plan completed
 		if run.PlanCompletedAt != nil {
-			applyStatusTimestamps["queued-at"] = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.QueuedAt = run.PlanCompletedAt.Format("2006-01-02T15:04:05Z")
 		} else if run.ApplyStartedAt != nil {
 			// Fallback to apply started time if plan completed time not available
-			applyStatusTimestamps["queued-at"] = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
+			applyStatusTimestamps.QueuedAt = run.ApplyStartedAt.Format("2006-01-02T15:04:05Z")
 		}
 	}
 
-	attributes := gin.H{
-		"execution-details": gin.H{
-			"mode": "remote", // TFE execution mode: remote, local, or agent
-		},
-		"status":                applyStatus,
-		"status-timestamps":     applyStatusTimestamps,
-		"resource-additions":    resourceAdditions,
-		"resource-changes":      resourceChanges,
-		"resource-destructions": resourceDestructions,
-		"resource-imports":      resourceImports,
+	attributes := ApplyAttributes{
+		ExecutionDetails:     ExecutionDetails{Mode: "remote"},
+		Status:               applyStatus,
+		StatusTimestamps:     applyStatusTimestamps,
+		ResourceAdditions:    resourceAdditions,
+		ResourceChanges:      resourceChanges,
+		ResourceDestructions: resourceDestructions,
+		ResourceImports:      resourceImports,
 	}
 
-	// Include apply-resources if available (from stored phase state)
+	// apply-resources rides along when stored phase state exists (StackWeaver extension).
 	if len(applyResources) > 0 {
-		// Convert ResourceState to JSON-compatible format
-		applyResourcesJSON := make([]gin.H, len(applyResources))
+		out := make([]ApplyResourceState, len(applyResources))
 		for i, res := range applyResources {
-			resourceJSON := gin.H{
-				"address": res.Address,
-				"status":  res.Status,
-				"action":  res.Action,
-			}
-			if res.ResourceID != "" {
-				resourceJSON["resource_id"] = res.ResourceID
+			out[i] = ApplyResourceState{
+				Address:      res.Address,
+				Status:       res.Status,
+				Action:       res.Action,
+				ResourceID:   res.ResourceID,
+				ErrorMessage: res.ErrorMessage,
+				Details:      res.Details,
 			}
 			if res.CreatedAt != nil {
-				resourceJSON["created_at"] = res.CreatedAt.Format("2006-01-02T15:04:05Z")
+				out[i].CreatedAt = res.CreatedAt.Format("2006-01-02T15:04:05Z")
 			}
-			if res.ErrorMessage != "" {
-				resourceJSON["error_message"] = res.ErrorMessage
-			}
-			if res.Details != "" {
-				resourceJSON["details"] = res.Details
-			}
-			applyResourcesJSON[i] = resourceJSON
 		}
-		attributes["apply-resources"] = applyResourcesJSON
+		attributes.ApplyResources = out
 	}
 
 	// Build log-read-url (TFE-compatible)
@@ -1505,30 +1293,15 @@ func (h *RunHandlerV2) GetApply(c *gin.Context) {
 
 	// AUD-045: run-scoped short-TTL log token instead of the caller's bearer token (see the run
 	// response builder above).
-	attributes["log-read-url"] = buildLogReadURL(c, scheme, host, run.ID, "phase=apply")
+	attributes.LogReadURL = buildLogReadURL(c, scheme, host, run.ID, "phase=apply")
 
-	// Build relationships according to TFE Applies API spec
-	relationships := gin.H{
-		"state-versions": gin.H{
-			"data": []gin.H{}, // Empty array - state versions are linked separately
-		},
-	}
-
-	// Build absolute URLs for links
-	applySelfURL := fmt.Sprintf("%s://%s/api/v2/applies/%s", scheme, host, run.ID)
-
-	links := gin.H{
-		"self": applySelfURL,
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"id":            run.ID, // Apply ID = Run ID
-			"type":          "applies",
-			"attributes":    attributes,
-			"relationships": relationships,
-			"links":         links,
-		},
+	// TFE Applies API: relationships.state-versions and a self link.
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[ApplyAttributes]{
+		ID:            run.ID, // Apply ID = Run ID
+		Type:          "applies",
+		Attributes:    attributes,
+		Relationships: PhaseRelationships{StateVersions: jsonapi.ManyRelationship{Data: []jsonapi.ResourceID{}}},
+		Links:         jsonapi.SelfLink{Self: fmt.Sprintf("%s://%s/api/v2/applies/%s", scheme, host, run.ID)},
 	})
 }
 
@@ -1583,15 +1356,7 @@ func (h *RunHandlerV2) fetchPhaseLogs(c *gin.Context, runID, phase string, offse
 	}
 
 	if h.storageClient == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "503",
-					"title":  "Service Unavailable",
-					"detail": "Storage client not initialized",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusServiceUnavailable, "Service Unavailable", "Storage client not initialized")
 		return nil, false
 	}
 
@@ -1620,15 +1385,7 @@ func (h *RunHandlerV2) GetLogs(c *gin.Context) {
 		} else {
 			user, err := h.authService.GetUserFromToken(tokenFromQuery)
 			if err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "401",
-							"title":  "Unauthorized",
-							"detail": "Invalid token",
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 				return
 			}
 			// Store user in context for potential future use
@@ -1644,15 +1401,7 @@ func (h *RunHandlerV2) GetLogs(c *gin.Context) {
 	// Get workspace to check execution mode
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to get workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get workspace")
 		return
 	}
 
@@ -1668,15 +1417,7 @@ func (h *RunHandlerV2) GetLogs(c *gin.Context) {
 			if phaseParam == "plan" || phaseParam == "apply" {
 				phase = phaseParam
 			} else {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "400",
-							"title":  "Bad Request",
-							"detail": "Invalid phase parameter. Must be 'plan' or 'apply'",
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid phase parameter. Must be 'plan' or 'apply'")
 				return
 			}
 		} else {
@@ -1684,15 +1425,7 @@ func (h *RunHandlerV2) GetLogs(c *gin.Context) {
 			if phaseParam == string(run.Operation) {
 				phase = phaseParam
 			} else {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "400",
-							"title":  "Bad Request",
-							"detail": fmt.Sprintf("Invalid phase parameter. Must be '%s' for %s runs", run.Operation, run.Operation),
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", fmt.Sprintf("Invalid phase parameter. Must be '%s' for %s runs", run.Operation, run.Operation))
 				return
 			}
 		}
@@ -1787,15 +1520,7 @@ func (h *RunHandlerV2) GetPlanLogs(c *gin.Context) {
 	if tokenFromQuery != "" {
 		user, err := h.authService.GetUserFromToken(tokenFromQuery)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "401",
-						"title":  "Unauthorized",
-						"detail": "Invalid token",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 			return
 		}
 		c.Set("user_id", user.ID)
@@ -1809,15 +1534,7 @@ func (h *RunHandlerV2) GetPlanLogs(c *gin.Context) {
 	// Get workspace to check execution mode
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to get workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get workspace")
 		return
 	}
 
@@ -1888,15 +1605,7 @@ func (h *RunHandlerV2) GetApplyLogs(c *gin.Context) {
 	if tokenFromQuery != "" {
 		user, err := h.authService.GetUserFromToken(tokenFromQuery)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "401",
-						"title":  "Unauthorized",
-						"detail": "Invalid token",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Invalid token")
 			return
 		}
 		c.Set("user_id", user.ID)
@@ -1910,30 +1619,14 @@ func (h *RunHandlerV2) GetApplyLogs(c *gin.Context) {
 	// Rejecting destroy here made stored destroy logs unreachable even though the
 	// frontend requests them via useRunPolling for destroy runs (#107).
 	if !runHasApplyPhase(run.Operation) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Apply logs only available for plan-and-apply and destroy runs",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Apply logs only available for plan-and-apply and destroy runs")
 		return
 	}
 
 	// Get workspace to check execution mode
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to get workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get workspace")
 		return
 	}
 
@@ -2000,59 +1693,27 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 	// Authenticate user (required for applying runs)
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	planRunID := c.Param("id")
 	if planRunID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid run ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid run ID")
 		return
 	}
 
 	// Get the plan run
 	planRun, err := h.runRepo.GetByID(planRunID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Run not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Run not found")
 		return
 	}
 
 	// Get workspace to check permissions
 	workspace, err := h.workspaceRepo.GetByID(planRun.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to retrieve workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to retrieve workspace")
 		return
 	}
 
@@ -2068,15 +1729,7 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 		&workspace.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	hasWorkspaceWrite, err := h.rbacService.CheckResourcePermission(
@@ -2088,28 +1741,12 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 		&workspace.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	// Both permissions required - viewers have neither
 	if !hasRunsPermission || !hasWorkspaceWrite {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "You do not have permission to apply runs in this workspace. Viewers can only view runs, not apply them.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to apply runs in this workspace. Viewers can only view runs, not apply them.")
 		return
 	}
 
@@ -2121,15 +1758,7 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 		// tfe_workspace_run treats `planned` as pending when a post-plan stage exists).
 		confirmable := []models.RunStatus{models.RunStatusPlanned, models.RunStatusPostPlanCompleted}
 		if planRun.Status != models.RunStatusPlanned && planRun.Status != models.RunStatusPostPlanCompleted {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "Run must be in 'planned' status before applying",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Run must be in 'planned' status before applying")
 			return
 		}
 
@@ -2139,9 +1768,7 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 		// after the stage passes. Without one, confirm goes straight to applying as before.
 		hasPreApplyStage, tsErr := h.taskStageRepo.HasStage(planRun.ID, models.TaskStagePreApply)
 		if tsErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check task stages"}},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check task stages")
 			return
 		}
 
@@ -2167,27 +1794,11 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 			fields,
 		)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to transition run to applying phase",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to transition run to applying phase")
 			return
 		}
 		if !ok {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": "Run is no longer in 'planned' status and cannot be applied.",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Run is no longer in 'planned' status and cannot be applied.")
 			return
 		}
 
@@ -2197,35 +1808,17 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 		// Reload run to ensure all fields are populated
 		planRun, err = h.runRepo.GetByID(planRun.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to retrieve updated run",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to retrieve updated run")
 			return
 		}
 
 		// TFE returns 202 Accepted with the updated run
-		c.JSON(http.StatusAccepted, gin.H{
-			"data": formatRunResponse(planRun, c, h.configVersionRepo, h.runRepo),
-		})
+		jsonapi.WriteDocument(c, http.StatusAccepted, formatRunResponse(planRun, c, h.configVersionRepo, h.runRepo))
 		return
 	}
 
 	// Only plan-and-apply runs can be applied
-	c.JSON(http.StatusBadRequest, gin.H{
-		"errors": []gin.H{
-			{
-				"status": "400",
-				"title":  "Bad Request",
-				"detail": "Only plan-and-apply runs can be applied. Plan-only runs cannot be applied.",
-			},
-		},
-	})
+	jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Only plan-and-apply runs can be applied. Plan-only runs cannot be applied.")
 }
 
 // ListByWorkspace lists runs for a workspace (by workspace ID)
@@ -2233,15 +1826,7 @@ func (h *RunHandlerV2) Apply(c *gin.Context) {
 func (h *RunHandlerV2) ListByWorkspace(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
@@ -2253,34 +1838,17 @@ func (h *RunHandlerV2) ListByWorkspace(c *gin.Context) {
 
 	runs, total, err := h.runRepo.WithContext(c.Request.Context()).ListByWorkspace(workspaceID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to list runs",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list runs")
 		return
 	}
 
 	// Format each run in TFE-compatible JSON:API format
-	formattedRuns := make([]gin.H, len(runs))
+	formattedRuns := make([]jsonapi.Resource[RunAttributes], len(runs))
 	for i, run := range runs {
 		formattedRuns[i] = formatRunResponse(&run, c, h.configVersionRepo, h.runRepo)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formattedRuns,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"page":     page,
-				"per_page": perPage,
-				"total":    total,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formattedRuns, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // Cancel cancels a run (TFE-compatible)
@@ -2313,15 +1881,7 @@ func (h *RunHandlerV2) Cancel(c *gin.Context) {
 		}
 	}
 	if !isCancellable {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Run cannot be cancelled in current state. Only pending, running, planning, or applying runs can be cancelled.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Run cannot be cancelled in current state. Only pending, running, planning, or applying runs can be cancelled.")
 		return
 	}
 
@@ -2333,27 +1893,11 @@ func (h *RunHandlerV2) Cancel(c *gin.Context) {
 	now := time.Now()
 	ok, err := h.runRepo.TransitionStatus(run.ID, cancellableStatuses, models.RunStatusCancelled, map[string]any{"completed_at": now})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to cancel run",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to cancel run")
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Run is no longer in a cancellable state.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Run is no longer in a cancellable state.")
 		return
 	}
 
@@ -2393,15 +1937,7 @@ func (h *RunHandlerV2) Discard(c *gin.Context) {
 		}
 	}
 	if !isDiscardable {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Run cannot be discarded in current state. Only pending or planned runs can be discarded.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Run cannot be discarded in current state. Only pending or planned runs can be discarded.")
 		return
 	}
 
@@ -2416,27 +1952,11 @@ func (h *RunHandlerV2) Discard(c *gin.Context) {
 		map[string]any{"completed_at": now},
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to discard run",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to discard run")
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Run can no longer be discarded (state changed).",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Run can no longer be discarded (state changed).")
 		return
 	}
 
@@ -2473,27 +1993,11 @@ func (h *RunHandlerV2) ForceCancel(c *gin.Context) {
 		map[string]any{"completed_at": now},
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to force-cancel run",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to force-cancel run")
 		return
 	}
 	if !ok {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Run cannot be force-cancelled in current state",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Run cannot be force-cancelled in current state")
 		return
 	}
 
@@ -2511,43 +2015,19 @@ func (h *RunHandlerV2) ForceExecute(c *gin.Context) {
 
 	// Force execute can only be used on pending runs when workspace is locked
 	if run.Status != models.RunStatusPending {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Run is not pending",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Run is not pending")
 		return
 	}
 
 	// Check if workspace is locked by another run
 	workspace, err := h.workspaceRepo.GetByID(run.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	if !workspace.Locked {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Workspace is not locked",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Workspace is not locked")
 		return
 	}
 
@@ -2557,15 +2037,7 @@ func (h *RunHandlerV2) ForceExecute(c *gin.Context) {
 	workspace.LockedBy = nil
 	workspace.LockedAt = nil
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to unlock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to unlock workspace")
 		return
 	}
 
@@ -2589,15 +2061,7 @@ func (h *RunHandlerV2) ListByOrganization(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
@@ -2609,34 +2073,17 @@ func (h *RunHandlerV2) ListByOrganization(c *gin.Context) {
 
 	runs, total, err := h.runRepo.WithContext(c.Request.Context()).ListByOrganization(org.ID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to list runs",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list runs")
 		return
 	}
 
 	// Format each run in TFE-compatible JSON:API format
-	formattedRuns := make([]gin.H, len(runs))
+	formattedRuns := make([]jsonapi.Resource[RunAttributes], len(runs))
 	for i, run := range runs {
 		formattedRuns[i] = formatRunResponse(&run, c, h.configVersionRepo, h.runRepo)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formattedRuns,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"page":     page,
-				"per_page": perPage,
-				"total":    total,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formattedRuns, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetQueue returns the run queue for an organization (TFE-compatible)
@@ -2646,42 +2093,24 @@ func (h *RunHandlerV2) GetQueue(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	limit := 50 // Default limit for queue
 	runs, err := h.runRepo.ListQueued(org.ID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to get run queue",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get run queue")
 		return
 	}
 
 	// Format each run in TFE-compatible JSON:API format
-	formattedRuns := make([]gin.H, len(runs))
+	formattedRuns := make([]jsonapi.Resource[RunAttributes], len(runs))
 	for i, run := range runs {
 		formattedRuns[i] = formatRunResponse(&run, c, h.configVersionRepo, h.runRepo)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formattedRuns,
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formattedRuns)
 }
 
 // createConfigurationVersionFromVCS creates a configuration version by cloning from VCS

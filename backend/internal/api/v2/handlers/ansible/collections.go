@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/services/ansible"
@@ -109,7 +110,7 @@ func (h *CollectionsHandler) ListPreInstalledCollections(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewFullPageMeta(len(data)))
 }
 
 // ListJobCollections returns collections installed for a specific job
@@ -117,9 +118,7 @@ func (h *CollectionsHandler) ListPreInstalledCollections(c *gin.Context) {
 func (h *CollectionsHandler) ListJobCollections(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []map[string]string{{"status": "400", "detail": "Invalid job ID"}},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid job ID")
 		return
 	}
 
@@ -129,31 +128,23 @@ func (h *CollectionsHandler) ListJobCollections(c *gin.Context) {
 	// is wired in.
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []map[string]string{{"status": "401", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, jsonapi.TitleUnauthorized, "Authentication required")
 		return
 	}
 	job, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []map[string]string{{"status": "404", "detail": "Job not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, jsonapi.TitleNotFound, "Job not found")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
 		c.Request.Context(), user.ID, rbac.ResourceTypeAnsibleJob, job.ID.String(), rbac.PermissionAnsibleJobRead, &job.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []map[string]string{{"status": "500", "detail": "Failed to check permissions"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []map[string]string{{"status": "403", "detail": "You don't have permission to view this job"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, jsonapi.TitleForbidden, "You don't have permission to view this job")
 		return
 	}
 
@@ -166,11 +157,20 @@ func (h *CollectionsHandler) ListJobCollections(c *gin.Context) {
 // GET /ansible/collections/search?q=keyword
 func (h *CollectionsHandler) SearchGalaxyCollections(c *gin.Context) {
 	// This would call the Galaxy API in a real implementation
-	// For now, return a placeholder response
-	c.JSON(http.StatusOK, gin.H{
-		"data": []interface{}{},
-		"meta": map[string]interface{}{
-			"message": "Galaxy search not yet implemented. Browse collections at https://galaxy.ansible.com",
-		},
+	// For now, return a placeholder response. It still carries the pagination block: a client
+	// cannot tell a stub from a genuinely empty result, so "zero rows, one page" is both true
+	// and the answer that stops it guessing.
+	data := []map[string]interface{}{}
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, galaxySearchMeta{
+		PaginationMeta: jsonapi.NewFullPageMeta(len(data)),
+		Message:        "Galaxy search not yet implemented. Browse collections at https://galaxy.ansible.com",
 	})
+}
+
+// galaxySearchMeta carries the standard pagination block alongside the stub's explanatory
+// message. Typed rather than a map so the wire shape is visible to the compiler and the
+// OpenAPI generator (#760).
+type galaxySearchMeta struct {
+	jsonapi.PaginationMeta
+	Message string `json:"message"`
 }

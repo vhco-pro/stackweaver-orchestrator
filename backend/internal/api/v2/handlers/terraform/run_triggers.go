@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -39,24 +40,7 @@ func NewRunTriggerHandlerV2(
 }
 
 func rtError(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{"errors": []gin.H{{"status": itoa(status), "title": title, "detail": detail}}})
-}
-
-func itoa(n int) string {
-	switch n {
-	case http.StatusBadRequest:
-		return "400"
-	case http.StatusUnauthorized:
-		return "401"
-	case http.StatusForbidden:
-		return "403"
-	case http.StatusNotFound:
-		return "404"
-	case http.StatusUnprocessableEntity:
-		return "422"
-	default:
-		return "500"
-	}
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // checkWorkspacePermission returns true if the caller holds `perm` on the workspace.
@@ -80,19 +64,32 @@ func (h *RunTriggerHandlerV2) checkWorkspacePermission(c *gin.Context, ws *model
 	return true
 }
 
-func formatRunTriggerResponse(rt *models.RunTrigger) gin.H {
-	return gin.H{
-		"id":   rt.ID,
-		"type": "run-triggers",
-		"attributes": gin.H{
-			"workspace-name":  rt.Workspace.Name,
-			"sourceable-name": rt.Sourceable.Name,
-			"created-at":      rt.CreatedAt.UTC().Format(time.RFC3339),
+// RunTriggerAttributes carries the display names of both ends of the trigger.
+type RunTriggerAttributes struct {
+	WorkspaceName  string `json:"workspace-name"`
+	SourceableName string `json:"sourceable-name"`
+	CreatedAt      string `json:"created-at"`
+}
+
+// RunTriggerRelationships: workspace = the TARGET (whose runs are triggered);
+// sourceable = the SOURCE.
+type RunTriggerRelationships struct {
+	Workspace  jsonapi.Relationship `json:"workspace"`
+	Sourceable jsonapi.Relationship `json:"sourceable"`
+}
+
+func formatRunTriggerResponse(rt *models.RunTrigger) jsonapi.Resource[RunTriggerAttributes] {
+	return jsonapi.Resource[RunTriggerAttributes]{
+		ID:   rt.ID,
+		Type: "run-triggers",
+		Attributes: RunTriggerAttributes{
+			WorkspaceName:  rt.Workspace.Name,
+			SourceableName: rt.Sourceable.Name,
+			CreatedAt:      rt.CreatedAt.UTC().Format(time.RFC3339),
 		},
-		"relationships": gin.H{
-			// workspace = the TARGET (whose runs are triggered); sourceable = the SOURCE.
-			"workspace":  gin.H{"data": gin.H{"id": rt.WorkspaceID, "type": "workspaces"}},
-			"sourceable": gin.H{"data": gin.H{"id": rt.SourceableID, "type": "workspaces"}},
+		Relationships: RunTriggerRelationships{
+			Workspace:  jsonapi.ToOne(rt.WorkspaceID, "workspaces"),
+			Sourceable: jsonapi.ToOne(rt.SourceableID, "workspaces"),
 		},
 	}
 }
@@ -172,7 +169,7 @@ func (h *RunTriggerHandlerV2) Create(c *gin.Context) {
 		rtError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to load created run trigger")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"data": formatRunTriggerResponse(created)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatRunTriggerResponse(created))
 }
 
 // GetByID handles GET /api/v2/run-triggers/:id.
@@ -195,7 +192,7 @@ func (h *RunTriggerHandlerV2) GetByID(c *gin.Context) {
 	if !h.checkWorkspacePermission(c, target, rbac.PermissionWorkspaceRead) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatRunTriggerResponse(rt)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatRunTriggerResponse(rt))
 }
 
 // Delete handles DELETE /api/v2/run-triggers/:id.
@@ -253,9 +250,9 @@ func (h *RunTriggerHandlerV2) ListByWorkspace(c *gin.Context) {
 		return
 	}
 
-	data := make([]gin.H, 0, len(triggers))
+	data := make([]jsonapi.Resource[RunTriggerAttributes], 0, len(triggers))
 	for i := range triggers {
 		data = append(data, formatRunTriggerResponse(&triggers[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewFullPageMeta(len(data)))
 }

@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/michielvha/logger"
 	"github.com/michielvha/stackweaver/backend/internal/api/pagination"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/response"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/crypto"
@@ -91,71 +93,31 @@ func (h *StateVersionHandlerV2) hostedStateDownloadURL(c *gin.Context, v *models
 func (h *StateVersionHandlerV2) ListByWorkspace(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	// Verify workspace exists and get project ID
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions read
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID, "read")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to view state versions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view state versions")
 		return
 	}
 
@@ -167,29 +129,12 @@ func (h *StateVersionHandlerV2) ListByWorkspace(c *gin.Context) {
 
 	versions, total, err := h.stateVersionRepo.ListByWorkspace(workspaceID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to list state versions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list state versions")
 		return
 	}
 
 	// TFE-compatible response format
-	c.JSON(http.StatusOK, gin.H{
-		"data": versions,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"page":     page,
-				"per_page": perPage,
-				"total":    total,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, versions, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // CurrentStateVersion returns the latest state version for a workspace (TFE-compatible).
@@ -198,68 +143,42 @@ func (h *StateVersionHandlerV2) ListByWorkspace(c *gin.Context) {
 func (h *StateVersionHandlerV2) CurrentStateVersion(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid workspace ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Workspace not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	ok, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID, "read")
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "Insufficient permissions to view state version"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view state version")
 		return
 	}
 
 	version, err := h.stateVersionRepo.GetLatest(workspaceID)
 	if err != nil || version == nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "No state version for this workspace"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "No state version for this workspace")
 		return
 	}
 
 	attrs := buildStateVersionAttributes(version)
 	attrs["hosted-state-download-url"] = h.hostedStateDownloadURL(c, version)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"id":         version.ID,
-			"type":       "state-versions",
-			"attributes": attrs,
-			"relationships": gin.H{
-				"workspace": gin.H{
-					"data": gin.H{"id": version.WorkspaceID, "type": "workspaces"},
-				},
-			},
-		},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[map[string]interface{}]{
+		ID:            version.ID,
+		Type:          "state-versions",
+		Attributes:    attrs,
+		Relationships: WorkspaceOnlyRelationships{Workspace: jsonapi.ToOne(version.WorkspaceID, "workspaces")},
 	})
 }
 
@@ -268,105 +187,48 @@ func (h *StateVersionHandlerV2) CurrentStateVersion(c *gin.Context) {
 func (h *StateVersionHandlerV2) Get(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid state version ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid state version ID")
 		return
 	}
 
 	version, err := h.stateVersionRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "State version not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "State version not found")
 		return
 	}
 
 	// Get workspace for permission check
 	workspace, err := h.workspaceRepo.GetByID(version.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions read
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, version.WorkspaceID, workspace.ProjectID, "read")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to view state version",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view state version")
 		return
 	}
 
 	attrs := buildStateVersionAttributes(version)
 	attrs["hosted-state-download-url"] = h.hostedStateDownloadURL(c, version)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"id":         version.ID,
-			"type":       "state-versions",
-			"attributes": attrs,
-			"relationships": gin.H{
-				"workspace": gin.H{
-					"data": gin.H{
-						"id":   version.WorkspaceID,
-						"type": "workspaces",
-					},
-				},
-			},
-		},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[map[string]interface{}]{
+		ID:            version.ID,
+		Type:          "state-versions",
+		Attributes:    attrs,
+		Relationships: WorkspaceOnlyRelationships{Workspace: jsonapi.ToOne(version.WorkspaceID, "workspaces")},
 	})
 }
 
@@ -389,61 +251,37 @@ func buildStateVersionAttributes(v *models.StateVersion) map[string]interface{} 
 func (h *StateVersionHandlerV2) Download(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid state version ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid state version ID")
 		return
 	}
 
 	version, err := h.stateVersionRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "State version not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "State version not found")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(version.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Workspace not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	ok, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, version.WorkspaceID, workspace.ProjectID, "read")
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "Insufficient permissions to download state"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to download state")
 		return
 	}
 
 	var stateJSON []byte
 	if h.stateService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "State storage unavailable"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "State storage unavailable")
 		return
 	}
 	// Route through the state service so encrypted-at-rest state is decrypted to plain
@@ -451,11 +289,7 @@ func (h *StateVersionHandlerV2) Download(c *gin.Context) {
 	stateJSON, err = h.stateService.GetStateObject(c.Request.Context(), version.WorkspaceID, version.Version)
 	if err != nil {
 		logger.Warnf("State version %s download: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to load state"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to load state")
 		return
 	}
 
@@ -468,94 +302,44 @@ func (h *StateVersionHandlerV2) Download(c *gin.Context) {
 func (h *StateVersionHandlerV2) GetOutputs(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid state version ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid state version ID")
 		return
 	}
 
 	version, err := h.stateVersionRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "State version not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "State version not found")
 		return
 	}
 
 	// Get workspace for permission check
 	workspace, err := h.workspaceRepo.GetByID(version.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions read-outputs (allows reading outputs even if full state is restricted)
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, version.WorkspaceID, workspace.ProjectID, "read-outputs")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to view state version outputs",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view state version outputs")
 		return
 	}
 
 	// TFE-compatible: mask sensitive values (return nil); see current-state-version-outputs.
 	outputs := materializedOutputs(h.stateOutputRepo, version, true, h.outputCrypto())
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": outputs,
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, outputs)
 }
 
 // CurrentStateVersionOutputs serves the outputs of a workspace's current (latest) state
@@ -565,30 +349,30 @@ func (h *StateVersionHandlerV2) GetOutputs(c *gin.Context) {
 func (h *StateVersionHandlerV2) CurrentStateVersionOutputs(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid workspace ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	ok, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspace.ID, workspace.ProjectID, "read-outputs")
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "Insufficient permissions to view outputs"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view outputs")
 		return
 	}
 	version, err := h.stateVersionRepo.GetLatest(workspace.ID)
 	if err != nil || version == nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "No state version for this workspace"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "No state version for this workspace")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": materializedOutputs(h.stateOutputRepo, version, true, h.outputCrypto())})
+	jsonapi.WriteDocument(c, http.StatusOK, materializedOutputs(h.stateOutputRepo, version, true, h.outputCrypto()))
 }
 
 // CurrentStateVersionResources serves the resources of a workspace's current (latest) state
@@ -598,57 +382,57 @@ func (h *StateVersionHandlerV2) CurrentStateVersionOutputs(c *gin.Context) {
 func (h *StateVersionHandlerV2) CurrentStateVersionResources(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid workspace ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	ok, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspace.ID, workspace.ProjectID, "read")
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "Insufficient permissions to view resources"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to view resources")
 		return
 	}
 	version, err := h.stateVersionRepo.GetLatest(workspace.ID)
 	if err != nil || version == nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "No state version for this workspace"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "No state version for this workspace")
 		return
 	}
 	mode := c.Query("mode")
-	resources := []gin.H{}
+	resources := []jsonapi.Resource[StateVersionResourceAttributes]{}
 	if h.stateResourceRepo != nil {
 		rows, listErr := h.stateResourceRepo.ListByStateVersion(version.ID, mode)
 		if listErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list resources"}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list resources")
 			return
 		}
 		resources = buildMaterializedResources(rows)
 	}
-	c.JSON(http.StatusOK, gin.H{"data": resources})
+	jsonapi.WriteDocument(c, http.StatusOK, resources)
 }
 
 // buildMaterializedResources renders state-version-resources JSON:API objects from rows.
-func buildMaterializedResources(rows []models.StateVersionResource) []gin.H {
-	result := []gin.H{}
+func buildMaterializedResources(rows []models.StateVersionResource) []jsonapi.Resource[StateVersionResourceAttributes] {
+	result := []jsonapi.Resource[StateVersionResourceAttributes]{}
 	for _, r := range rows {
-		result = append(result, gin.H{
-			"id":   r.ID,
-			"type": "state-version-resources",
-			"attributes": gin.H{
-				"address":        r.Address,
-				"mode":           r.Mode,
-				"type":           r.Type,
-				"name":           r.Name,
-				"provider":       r.Provider,
-				"module":         r.Module,
-				"instance-count": r.InstanceCount,
+		result = append(result, jsonapi.Resource[StateVersionResourceAttributes]{
+			ID:   r.ID,
+			Type: "state-version-resources",
+			Attributes: StateVersionResourceAttributes{
+				Address:       r.Address,
+				Mode:          r.Mode,
+				Type:          r.Type,
+				Name:          r.Name,
+				Provider:      r.Provider,
+				Module:        r.Module,
+				InstanceCount: r.InstanceCount,
 			},
 		})
 	}
@@ -659,13 +443,13 @@ func buildMaterializedResources(rows []models.StateVersionResource) []gin.H {
 // materialized state_version_outputs table (State Storage Rework - the single source of truth).
 // cryptoSvc decrypts sensitive output values stored encrypted at rest (#95); pass nil when
 // encryption is disabled.
-func materializedOutputs(repo *repository.StateVersionOutputRepository, version *models.StateVersion, maskSensitive bool, cryptoSvc *crypto.CryptoService) []gin.H {
+func materializedOutputs(repo *repository.StateVersionOutputRepository, version *models.StateVersion, maskSensitive bool, cryptoSvc *crypto.CryptoService) []jsonapi.Resource[StateVersionOutputAttributes] {
 	if repo == nil || version == nil {
-		return []gin.H{}
+		return []jsonapi.Resource[StateVersionOutputAttributes]{}
 	}
 	outs, err := repo.ListByStateVersion(version.ID)
 	if err != nil {
-		return []gin.H{}
+		return []jsonapi.Resource[StateVersionOutputAttributes]{}
 	}
 	return buildMaterializedOutputs(outs, maskSensitive, cryptoSvc)
 }
@@ -676,8 +460,8 @@ func materializedOutputs(repo *repository.StateVersionOutputRepository, version 
 // are decrypted with cryptoSvc first; if a value is encrypted and cannot be decrypted
 // (no key) it is nulled so ciphertext never leaks. Sensitive values are nulled when
 // maskSensitive.
-func buildMaterializedOutputs(outs []models.StateVersionOutput, maskSensitive bool, cryptoSvc *crypto.CryptoService) []gin.H {
-	result := []gin.H{}
+func buildMaterializedOutputs(outs []models.StateVersionOutput, maskSensitive bool, cryptoSvc *crypto.CryptoService) []jsonapi.Resource[StateVersionOutputAttributes] {
+	result := []jsonapi.Resource[StateVersionOutputAttributes]{}
 	for _, o := range outs {
 		raw := o.Value
 		if o.ValueEncrypted {
@@ -696,17 +480,17 @@ func buildMaterializedOutputs(outs []models.StateVersionOutput, maskSensitive bo
 		if maskSensitive && o.Sensitive {
 			value = nil
 		}
-		attrs := gin.H{"name": o.Name, "value": value, "sensitive": o.Sensitive}
+		attrs := StateVersionOutputAttributes{Name: o.Name, Value: value, Sensitive: o.Sensitive}
 		if o.Type != "" {
 			var t any
 			if err := json.Unmarshal([]byte(o.Type), &t); err == nil {
-				attrs["type"] = t
+				attrs.Type = t
 			}
 		}
-		result = append(result, gin.H{
-			"id":         o.ID,
-			"type":       "state-version-outputs",
-			"attributes": attrs,
+		result = append(result, jsonapi.Resource[StateVersionOutputAttributes]{
+			ID:         o.ID,
+			Type:       "state-version-outputs",
+			Attributes: attrs,
 		})
 	}
 	return result
@@ -717,71 +501,31 @@ func buildMaterializedOutputs(outs []models.StateVersionOutput, maskSensitive bo
 func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	// Verify workspace exists
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions write
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID, "write")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to create state versions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to create state versions")
 		return
 	}
 
@@ -791,15 +535,7 @@ func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 		if workspace.LockedReason != "" {
 			detail = fmt.Sprintf("Workspace is locked: %s", workspace.LockedReason)
 		}
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": detail,
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", detail)
 		return
 	}
 
@@ -807,45 +543,21 @@ func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 	if h.stateService != nil {
 		existingLock, lockErr := h.stateService.GetStateLock(c.Request.Context(), workspaceID)
 		if lockErr == nil && existingLock != nil && !existingLock.IsExpired() {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": fmt.Sprintf("State is locked by run %v (lock ID: %s)", existingLock.LockedBy, existingLock.LockID),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", fmt.Sprintf("State is locked by run %v (lock ID: %s)", existingLock.LockedBy, existingLock.LockID))
 			return
 		}
 	}
 
 	var req CreateStateVersionRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	// Marshal the state for storage first (validation), then reserve the version + write the object.
 	stateJSON, err := json.Marshal(req.StateData)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Failed to marshal state data",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Failed to marshal state data")
 		return
 	}
 
@@ -859,20 +571,10 @@ func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 	nextVersion, err := h.stateVersionRepo.CreateNextVersion(stateVersion)
 	if err != nil {
 		if errors.Is(err, repository.ErrStateSerialRegression) {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{{"status": "409", "title": "Conflict", "detail": "incoming state serial is older than the current state version"}},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "incoming state serial is older than the current state version")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to create state version",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create state version")
 		return
 	}
 
@@ -881,15 +583,7 @@ func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 	if h.stateService != nil {
 		if err := h.stateService.PutStateObject(c.Request.Context(), workspaceID, nextVersion, stateJSON); err != nil {
 			_ = h.stateVersionRepo.Delete(stateVersion.ID)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": fmt.Sprintf("Failed to store state in object storage: %v", err),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to store state in object storage: %v", err))
 			return
 		}
 	}
@@ -903,20 +597,11 @@ func (h *StateVersionHandlerV2) Create(c *gin.Context) {
 	}
 
 	// TFE-compatible response format
-	c.JSON(http.StatusCreated, gin.H{
-		"data": gin.H{
-			"id":         stateVersion.ID,
-			"type":       "state-versions",
-			"attributes": stateVersion,
-			"relationships": gin.H{
-				"workspace": gin.H{
-					"data": gin.H{
-						"id":   workspaceID,
-						"type": "workspaces",
-					},
-				},
-			},
-		},
+	jsonapi.WriteDocument(c, http.StatusCreated, jsonapi.Resource[*models.StateVersion]{
+		ID:            stateVersion.ID,
+		Type:          "state-versions",
+		Attributes:    stateVersion,
+		Relationships: WorkspaceOnlyRelationships{Workspace: jsonapi.ToOne(workspaceID, "workspaces")},
 	})
 }
 
@@ -926,71 +611,31 @@ func (h *StateVersionHandlerV2) RemoveResource(c *gin.Context) {
 	logger.Debugf("StateVersionHandlerV2 RemoveResource - Request received for workspace: %s", c.Param("id"))
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	// Verify workspace exists and get project ID
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions write
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID, "write")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to modify state",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to modify state")
 		return
 	}
 
@@ -999,78 +644,36 @@ func (h *StateVersionHandlerV2) RemoveResource(c *gin.Context) {
 		Address string `json:"address" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": fmt.Sprintf("Invalid request: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 
 	// Remove resource from state
 	if h.stateService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "State service not initialized",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "State service not initialized")
 		return
 	}
 
 	if err := h.stateService.RemoveResourceFromState(c.Request.Context(), workspaceID, req.Address); err != nil {
 		// Check if it's a "not found" error
 		if strings.Contains(err.Error(), "not found") {
-			c.JSON(http.StatusNotFound, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "404",
-						"title":  "Not Found",
-						"detail": err.Error(),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusNotFound, "Not Found", err.Error())
 			return
 		}
 
 		// Check if it's a "locked" error
 		if strings.Contains(err.Error(), "locked") {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": err.Error(),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", err.Error())
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
 	// Return success
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"message": fmt.Sprintf("Resource %s removed from state", req.Address),
-		},
+	jsonapi.WriteDocument(c, http.StatusOK, response.MessageResponse{
+		Message: fmt.Sprintf("Resource %s removed from state", req.Address),
 	})
 }
 
@@ -1079,127 +682,55 @@ func (h *StateVersionHandlerV2) RemoveResource(c *gin.Context) {
 func (h *StateVersionHandlerV2) Delete(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid state version ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid state version ID")
 		return
 	}
 
 	// Get state version
 	version, err := h.stateVersionRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "State version not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "State version not found")
 		return
 	}
 
 	// Get workspace for permission check
 	workspace, err := h.workspaceRepo.GetByID(version.WorkspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Check permission: state versions write
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckStateVersionPermission(c.Request.Context(), user.ID, version.WorkspaceID, workspace.ProjectID, "write")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to delete state version",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to delete state version")
 		return
 	}
 
 	// Delete state version
 	if h.stateService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "State service not initialized",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "State service not initialized")
 		return
 	}
 
 	if err := h.stateService.DeleteStateVersion(c.Request.Context(), id); err != nil {
 		// Check if it's a "locked" error
 		if strings.Contains(err.Error(), "locked") {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": err.Error(),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", err.Error())
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 

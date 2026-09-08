@@ -1,0 +1,10 @@
+{
+  "method": "GET",
+  "path": "/v1/modules/:namespace",
+  "status": 404,
+  "body": {
+    "errors": [
+      "module not found"
+    ]
+  }
+}

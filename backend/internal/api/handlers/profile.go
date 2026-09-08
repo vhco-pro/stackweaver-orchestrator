@@ -4,8 +4,10 @@ package handlers
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/profile"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -31,7 +33,7 @@ func (h *ProfileHandler) GetProfile(c *gin.Context) {
 	// Get local user from context
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		jsonapi.WriteError(c, http.StatusUnauthorized, jsonapi.TitleUnauthorized, "unauthorized")
 		return
 	}
 
@@ -45,32 +47,32 @@ func (h *ProfileHandler) GetProfile(c *gin.Context) {
 	}
 
 	// Merge Zitadel profile with local user data
-	response := gin.H{
-		"id":         user.ID.String(),
-		"email":      user.Email,
-		"name":       user.Name,
-		"username":   user.Username,
-		"bio":        user.Bio,
-		"company":    user.Company,
-		"location":   user.Location,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
+	response := ProfileResponse{
+		ID:        user.ID.String(),
+		Email:     user.Email,
+		Name:      user.Name,
+		Username:  user.Username,
+		Bio:       user.Bio,
+		Company:   user.Company,
+		Location:  user.Location,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
 	}
 
 	// Override with Zitadel data if available (Zitadel is source of truth for name/email)
 	if zitadelProfile != nil {
 		if zitadelProfile.Email != "" {
-			response["email"] = zitadelProfile.Email
+			response.Email = zitadelProfile.Email
 		}
 		if zitadelProfile.Name != "" {
-			response["name"] = zitadelProfile.Name
+			response.Name = zitadelProfile.Name
 		}
 	}
 
 	// Fetch avatar from Zitadel UserInfo (picture claim) for JWT-authenticated users.
 	// On failure, avatar is simply omitted - the frontend will show a fallback.
 	if picture := h.authService.FetchUserInfoPicture(c.Request.Context(), c); picture != "" {
-		response["avatar"] = picture
+		response.Avatar = picture
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -91,7 +93,7 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 	// Read raw JSON to check which fields are present (including empty strings)
 	var jsonData map[string]interface{}
 	if err := c.ShouldBindJSON(&jsonData); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, err.Error())
 		return
 	}
 
@@ -131,7 +133,7 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 	// Get local user from context
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		jsonapi.WriteError(c, http.StatusUnauthorized, jsonapi.TitleUnauthorized, "unauthorized")
 		return
 	}
 
@@ -157,7 +159,7 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 
 			if shouldUpdateZitadel {
 				if err := h.profileService.UpdateUserProfile(userSubject, updateReq); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update profile in Zitadel", "details": err.Error()})
+					jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "failed to update profile in Zitadel"+": "+err.Error())
 					return
 				}
 			}
@@ -186,20 +188,53 @@ func (h *ProfileHandler) UpdateProfile(c *gin.Context) {
 	}
 
 	if err := h.userRepo.Update(user); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update profile", "details": err.Error()})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "failed to update profile"+": "+err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Profile updated successfully",
-		"profile": gin.H{
-			"id":       user.ID.String(),
-			"email":    user.Email,
-			"name":     user.Name,
-			"username": user.Username,
-			"bio":      user.Bio,
-			"company":  user.Company,
-			"location": user.Location,
+	c.JSON(http.StatusOK, ProfileUpdateResponse{
+		Message: "Profile updated successfully",
+		Profile: ProfileSummary{
+			ID:       user.ID.String(),
+			Email:    user.Email,
+			Name:     user.Name,
+			Username: user.Username,
+			Bio:      user.Bio,
+			Company:  user.Company,
+			Location: user.Location,
 		},
 	})
+}
+
+// ProfileSummary is the subset of a user returned after a profile update.
+type ProfileSummary struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Username string `json:"username"`
+	Bio      string `json:"bio"`
+	Company  string `json:"company"`
+	Location string `json:"location"`
+}
+
+// ProfileUpdateResponse is the body of the profile update endpoint.
+type ProfileUpdateResponse struct {
+	Message string         `json:"message"`
+	Profile ProfileSummary `json:"profile"`
+}
+
+// ProfileResponse is the settings-profile payload: local user data with Zitadel's name and
+// email taking precedence where present. Avatar comes from Zitadel's picture claim and is
+// omitted on failure, so the frontend falls back rather than rendering a broken image.
+type ProfileResponse struct {
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	Name      string    `json:"name"`
+	Username  string    `json:"username"`
+	Bio       string    `json:"bio"`
+	Company   string    `json:"company"`
+	Location  string    `json:"location"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Avatar    string    `json:"avatar,omitempty"`
 }

@@ -5,10 +5,10 @@ package handlers
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/apikey"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -44,11 +44,7 @@ func NewOrganizationTokenHandlerV2(
 
 // jsonAPIError writes a single-error JSON:API error response (status as the numeric code string).
 func jsonAPIError(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{
-		"errors": []gin.H{
-			{"status": strconv.Itoa(status), "title": title, "detail": detail},
-		},
-	})
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // auditTrailTokenType is the value of the `?token=` query param that selects the audit-trail token
@@ -101,20 +97,20 @@ func (h *OrganizationTokenHandlerV2) resolveOrgOwner(c *gin.Context) (*models.Or
 
 // orgTokenResource builds the JSON:API resource for an org token. token is the plaintext, included only
 // on create (empty on read).
-func orgTokenResource(key *models.APIKey, token string) gin.H {
-	attrs := gin.H{
-		"created-at":   key.CreatedAt,
-		"last-used-at": key.LastUsedAt,
-		"expired-at":   key.ExpiresAt,
+func orgTokenResource(key *models.APIKey, token string) jsonapi.Document {
+	attrs := OrgTokenAttributes{
+		CreatedAt:  key.CreatedAt,
+		LastUsedAt: key.LastUsedAt,
+		ExpiredAt:  key.ExpiresAt,
 	}
 	if token != "" {
-		attrs["token"] = token
+		attrs.Token = token
 	}
-	return gin.H{
-		"data": gin.H{
-			"id":         key.ID,
-			"type":       "authentication-tokens",
-			"attributes": attrs,
+	return jsonapi.Document{
+		Data: jsonapi.Resource[OrgTokenAttributes]{
+			ID:         key.ID.String(),
+			Type:       "authentication-tokens",
+			Attributes: attrs,
 		},
 	}
 }
