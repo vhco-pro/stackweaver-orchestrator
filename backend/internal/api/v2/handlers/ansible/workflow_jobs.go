@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/services/ansible"
@@ -24,7 +25,7 @@ func (h *WorkflowHandler) SetEngine(engine *ansible.WorkflowEngineService) {
 func (h *WorkflowHandler) resolveWorkflowForRun(c *gin.Context, permission rbac.Permission) *models.AnsibleWorkflow {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid workflow ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workflow ID")
 		return nil
 	}
 	return h.resolveWorkflowByID(c, id, permission)
@@ -35,69 +36,69 @@ func (h *WorkflowHandler) resolveWorkflowForRun(c *gin.Context, permission rbac.
 func (h *WorkflowHandler) resolveWorkflowByID(c *gin.Context, id uuid.UUID, permission rbac.Permission) *models.AnsibleWorkflow {
 	workflow, err := h.workflowRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workflow not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workflow not found")
 		return nil
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return nil
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
 		c.Request.Context(), user.ID, rbac.ResourceTypeAnsibleJobTemplate, workflow.ID.String(), permission, &workflow.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return nil
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to run this workflow"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to run this workflow")
 		return nil
 	}
 	return workflow
 }
 
-func formatWorkflowJob(job *models.AnsibleWorkflowJob) gin.H {
-	attrs := gin.H{
-		"name":        job.Name,
-		"status":      job.Status,
-		"started-at":  job.StartedAt,
-		"finished-at": job.FinishedAt,
-		"created-at":  job.CreatedAt.Format(time.RFC3339),
-	}
-	return gin.H{
-		"id":         job.ID.String(),
-		"type":       "ansible-workflow-jobs",
-		"attributes": attrs,
-		"relationships": gin.H{
-			"workflow": gin.H{"data": gin.H{"id": job.WorkflowID.String(), "type": "ansible-workflows"}},
+func formatWorkflowJob(job *models.AnsibleWorkflowJob) jsonapi.Resource[WorkflowJobAttributes] {
+	return jsonapi.Resource[WorkflowJobAttributes]{
+		ID:   job.ID.String(),
+		Type: "ansible-workflow-jobs",
+		Attributes: WorkflowJobAttributes{
+			Name:       job.Name,
+			Status:     job.Status,
+			StartedAt:  job.StartedAt,
+			FinishedAt: job.FinishedAt,
+			CreatedAt:  job.CreatedAt.Format(time.RFC3339),
+		},
+		Relationships: WorkflowJobOnlyRelationships{
+			Workflow: jsonapi.ToOne(job.WorkflowID.String(), "ansible-workflows"),
 		},
 	}
 }
 
-func formatWorkflowNodeJob(nodeJob *models.AnsibleWorkflowNodeJob) gin.H {
-	attrs := gin.H{
-		"status":      nodeJob.Status,
-		"node-type":   nodeJob.Node.NodeType,
-		"identifier":  nodeJob.Node.Identifier,
-		"started-at":  nodeJob.StartedAt,
-		"finished-at": nodeJob.FinishedAt,
-		"denied":      nodeJob.Denied,
-	}
-	rels := gin.H{
-		"node": gin.H{"data": gin.H{"id": nodeJob.NodeID.String(), "type": "ansible-workflow-nodes"}},
+func formatWorkflowNodeJob(nodeJob *models.AnsibleWorkflowNodeJob) jsonapi.Resource[WorkflowNodeJobAttributes] {
+	rels := WorkflowNodeJobRelationships{
+		Node: jsonapi.ToOne(nodeJob.NodeID.String(), "ansible-workflow-nodes"),
 	}
 	if nodeJob.AnsibleJobID != nil {
-		rels["job"] = gin.H{"data": gin.H{"id": nodeJob.AnsibleJobID.String(), "type": "ansible-jobs"}}
+		r := jsonapi.ToOne(nodeJob.AnsibleJobID.String(), "ansible-jobs")
+		rels.Job = &r
 	}
 	if nodeJob.Node.JobTemplateID != nil {
-		rels["job-template"] = gin.H{"data": gin.H{"id": nodeJob.Node.JobTemplateID.String(), "type": "ansible-job-templates"}}
+		r := jsonapi.ToOne(nodeJob.Node.JobTemplateID.String(), "ansible-job-templates")
+		rels.JobTemplate = &r
 	}
-	return gin.H{
-		"id":            nodeJob.ID.String(),
-		"type":          "ansible-workflow-node-jobs",
-		"attributes":    attrs,
-		"relationships": rels,
+	return jsonapi.Resource[WorkflowNodeJobAttributes]{
+		ID:   nodeJob.ID.String(),
+		Type: "ansible-workflow-node-jobs",
+		Attributes: WorkflowNodeJobAttributes{
+			Status:     nodeJob.Status,
+			NodeType:   nodeJob.Node.NodeType,
+			Identifier: nodeJob.Node.Identifier,
+			StartedAt:  nodeJob.StartedAt,
+			FinishedAt: nodeJob.FinishedAt,
+			Denied:     nodeJob.Denied,
+		},
+		Relationships: rels,
 	}
 }
 
@@ -109,7 +110,7 @@ func (h *WorkflowHandler) LaunchWorkflow(c *gin.Context) {
 		return
 	}
 	if h.engine == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Workflow engine not configured"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Workflow engine not configured")
 		return
 	}
 	var req struct {
@@ -125,10 +126,10 @@ func (h *WorkflowHandler) LaunchWorkflow(c *gin.Context) {
 
 	wfJob, err := h.engine.LaunchWorkflow(c.Request.Context(), workflow.ID, launchedBy, req.ExtraVars)
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"errors": []gin.H{{"status": "409", "title": "Conflict", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", err.Error())
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"data": formatWorkflowJob(wfJob)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatWorkflowJob(wfJob))
 }
 
 // ListWorkflowJobs lists a workflow's runs.
@@ -138,16 +139,21 @@ func (h *WorkflowHandler) ListWorkflowJobs(c *gin.Context) {
 	if workflow == nil {
 		return
 	}
-	jobs, total, err := h.workflowRepo.ListWorkflowJobsByWorkflow(workflow.ID, 50, 0)
+	// This one caps rows, so it cannot use NewFullPageMeta. It already carried the true total,
+	// just in a bespoke one-member block no client knows how to read; the six-member block says
+	// the same thing in the shape go-tfe and fetchAllPages already expect. Reporting it obliges
+	// the handler to honour page[number] too - see PageParams.
+	page, perPage := jsonapi.PageParams(c, 50)
+	jobs, total, err := h.workflowRepo.ListWorkflowJobsByWorkflow(workflow.ID, perPage, jsonapi.Offset(page, perPage))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list workflow runs"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list workflow runs")
 		return
 	}
-	data := make([]gin.H, 0, len(jobs))
+	data := make([]jsonapi.Resource[WorkflowJobAttributes], 0, len(jobs))
 	for i := range jobs {
 		data = append(data, formatWorkflowJob(&jobs[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "meta": gin.H{"total-count": total}})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetWorkflowJob returns one run with its node jobs.
@@ -155,23 +161,23 @@ func (h *WorkflowHandler) ListWorkflowJobs(c *gin.Context) {
 func (h *WorkflowHandler) GetWorkflowJob(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid workflow job ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workflow job ID")
 		return
 	}
 	wfJob, err := h.workflowRepo.GetWorkflowJobByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workflow run not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workflow run not found")
 		return
 	}
 	// Permission via the parent workflow.
 	if h.resolveWorkflowByID(c, wfJob.WorkflowID, rbac.PermissionAnsibleJobTemplateRead) == nil {
 		return
 	}
-	nodes := make([]gin.H, 0, len(wfJob.NodeJobs))
+	nodes := make([]jsonapi.Resource[WorkflowNodeJobAttributes], 0, len(wfJob.NodeJobs))
 	for i := range wfJob.NodeJobs {
 		nodes = append(nodes, formatWorkflowNodeJob(&wfJob.NodeJobs[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatWorkflowJob(wfJob), "included": nodes})
+	c.JSON(http.StatusOK, jsonapi.Document{Data: formatWorkflowJob(wfJob), Included: nodes})
 }
 
 // ApproveWorkflowNode approves a waiting approval node.
@@ -188,22 +194,22 @@ func (h *WorkflowHandler) DenyWorkflowNode(c *gin.Context) {
 
 func (h *WorkflowHandler) decideWorkflowNode(c *gin.Context, approve bool) {
 	if h.engine == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Workflow engine not configured"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Workflow engine not configured")
 		return
 	}
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid node job ID"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid node job ID")
 		return
 	}
 	nodeJob, err := h.workflowRepo.GetNodeJobByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workflow node run not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workflow node run not found")
 		return
 	}
 	wfJob, err := h.workflowRepo.GetWorkflowJobByID(nodeJob.WorkflowJobID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workflow run not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workflow run not found")
 		return
 	}
 	// Approving runs jobs, so it requires execute permission on the workflow.
@@ -221,7 +227,7 @@ func (h *WorkflowHandler) decideWorkflowNode(c *gin.Context, approve bool) {
 		err = h.engine.DenyNode(c.Request.Context(), id, decidedBy)
 	}
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"errors": []gin.H{{"status": "409", "title": "Conflict", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", err.Error())
 		return
 	}
 	c.Status(http.StatusNoContent)

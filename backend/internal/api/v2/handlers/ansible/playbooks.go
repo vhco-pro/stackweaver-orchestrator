@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -98,20 +99,12 @@ func (h *PlaybookHandler) SetAgentPoolRepo(repo *repository.AgentPoolRepository)
 // 400 response and returns false when the pool is missing or foreign.
 func (h *PlaybookHandler) validateAgentPoolInOrg(c *gin.Context, poolID, orgID uuid.UUID) bool {
 	if h.agentPoolRepo == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Agent pool validation unavailable"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Agent pool validation unavailable")
 		return false
 	}
 	pool, err := h.agentPoolRepo.GetByID(poolID, false)
 	if err != nil || pool.OrganizationID != orgID {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Agent pool not found in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Agent pool not found in this organization")
 		return false
 	}
 	return true
@@ -388,22 +381,14 @@ func (h *PlaybookHandler) ListPlaybooks(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	// RBAC: check project-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -415,19 +400,11 @@ func (h *PlaybookHandler) ListPlaybooks(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list playbooks in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list playbooks in this project")
 		return
 	}
 
@@ -440,25 +417,11 @@ func (h *PlaybookHandler) ListPlaybooks(c *gin.Context) {
 
 	playbooks, total, err := h.playbookRepo.ListByProject(projectID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list playbooks"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list playbooks")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatPlaybooksResponse(playbooks),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatPlaybooksResponse(playbooks), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // ListPlaybooksByOrganization lists all playbooks for an organization
@@ -467,39 +430,23 @@ func (h *PlaybookHandler) ListPlaybooksByOrganization(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list playbooks in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list playbooks in this organization")
 		return
 	}
 
@@ -512,25 +459,11 @@ func (h *PlaybookHandler) ListPlaybooksByOrganization(c *gin.Context) {
 
 	playbooks, total, err := h.playbookRepo.ListByOrganization(org.ID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list playbooks"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list playbooks")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatPlaybooksResponse(playbooks),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatPlaybooksResponse(playbooks), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetPlaybook retrieves a playbook by ID
@@ -539,32 +472,20 @@ func (h *PlaybookHandler) GetPlaybook(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	playbook, err := h.playbookRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Playbook not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Playbook not found")
 		return
 	}
 
 	// RBAC: check resource-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -576,25 +497,15 @@ func (h *PlaybookHandler) GetPlaybook(c *gin.Context) {
 		&playbook.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to view this playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to view this playbook")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatPlaybookResponse(playbook),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatPlaybookResponse(playbook))
 }
 
 // CreatePlaybook creates a new playbook
@@ -603,22 +514,14 @@ func (h *PlaybookHandler) CreatePlaybook(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	// RBAC: check project-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -630,29 +533,17 @@ func (h *PlaybookHandler) CreatePlaybook(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create playbooks in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create playbooks in this project")
 		return
 	}
 
 	var req CreatePlaybookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -677,31 +568,21 @@ func (h *PlaybookHandler) CreatePlaybook(c *gin.Context) {
 	if req.Data.Relationships.VCSConnection.Data != nil {
 		vid, err := uuid.Parse(req.Data.Relationships.VCSConnection.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 			return
 		}
 		playbook.VCSConnectionID = &vid
 	}
 
 	if err := h.playbookRepo.Create(playbook); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to create playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create playbook")
 		return
 	}
 
 	// Register ADO webhooks if this playbook is linked to an Azure DevOps repository
 	h.maybeRegisterADOWebhook(playbook.VCSConnectionID, playbook.VCSRepository)
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatPlaybookResponse(playbook),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatPlaybookResponse(playbook))
 }
 
 // CreatePlaybookByOrganization creates a new playbook (org-scoped, TFE-compatible pattern)
@@ -710,49 +591,29 @@ func (h *PlaybookHandler) CreatePlaybookByOrganization(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create playbooks in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create playbooks in this organization")
 		return
 	}
 
 	var req CreatePlaybookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -761,21 +622,13 @@ func (h *PlaybookHandler) CreatePlaybookByOrganization(c *gin.Context) {
 	if req.Data.Relationships.Project.Data != nil && req.Data.Relationships.Project.Data.ID != "" {
 		pid, err := uuid.Parse(req.Data.Relationships.Project.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		// Validate project belongs to organization
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to this organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to this organization")
 			return
 		}
 		projectID = pid
@@ -783,11 +636,7 @@ func (h *PlaybookHandler) CreatePlaybookByOrganization(c *gin.Context) {
 		// Use first project in organization (TFE-compatible behavior)
 		projects, _, err := h.projectRepo.ListByOrganization(org.ID, 1, 0)
 		if err != nil || len(projects) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Organization must have at least one project to create playbooks"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Organization must have at least one project to create playbooks")
 			return
 		}
 		projectID = projects[0].ID
@@ -814,22 +663,14 @@ func (h *PlaybookHandler) CreatePlaybookByOrganization(c *gin.Context) {
 	if req.Data.Relationships.VCSConnection.Data != nil {
 		vid, err := uuid.Parse(req.Data.Relationships.VCSConnection.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 			return
 		}
 		playbook.VCSConnectionID = &vid
 	}
 
 	if err := h.playbookRepo.Create(playbook); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to create playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create playbook")
 		return
 	}
 
@@ -839,9 +680,7 @@ func (h *PlaybookHandler) CreatePlaybookByOrganization(c *gin.Context) {
 	// Auto-trigger sync for VCS-backed playbooks
 	h.enqueueInitialSync(playbook)
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatPlaybookResponse(playbook),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatPlaybookResponse(playbook))
 }
 
 // UpdatePlaybook updates a playbook
@@ -850,32 +689,20 @@ func (h *PlaybookHandler) UpdatePlaybook(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	playbook, err := h.playbookRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Playbook not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Playbook not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -887,29 +714,17 @@ func (h *PlaybookHandler) UpdatePlaybook(c *gin.Context) {
 		&playbook.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to update this playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to update this playbook")
 		return
 	}
 
 	var req UpdatePlaybookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -940,11 +755,7 @@ func (h *PlaybookHandler) UpdatePlaybook(c *gin.Context) {
 		} else {
 			vid, err := uuid.Parse(req.Data.Relationships.VCSConnection.Data.ID)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 				return
 			}
 			playbook.VCSConnectionID = &vid
@@ -952,20 +763,14 @@ func (h *PlaybookHandler) UpdatePlaybook(c *gin.Context) {
 	}
 
 	if err := h.playbookRepo.Update(playbook); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to update playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update playbook")
 		return
 	}
 
 	// Register ADO webhooks if this playbook is linked to an Azure DevOps repository
 	h.maybeRegisterADOWebhook(playbook.VCSConnectionID, playbook.VCSRepository)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatPlaybookResponse(playbook),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatPlaybookResponse(playbook))
 }
 
 // DeletePlaybook deletes a playbook
@@ -974,33 +779,21 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	// Fetch playbook to get ProjectID for RBAC check
 	playbook, err := h.playbookRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Playbook not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Playbook not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1012,19 +805,11 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 		&playbook.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to delete this playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to delete this playbook")
 		return
 	}
 
@@ -1035,36 +820,20 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 	if c.Query("force") == "true" {
 		project, err := h.projectRepo.GetByID(playbook.ProjectID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to resolve organization for force delete"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to resolve organization for force delete")
 			return
 		}
 		canManage, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, project.OrganizationID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 			return
 		}
 		if !canManage {
-			c.JSON(http.StatusForbidden, gin.H{
-				"errors": []gin.H{
-					{"status": "403", "title": "Forbidden", "detail": "Force delete requires organization-level Ansible management permission"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Force delete requires organization-level Ansible management permission")
 			return
 		}
 		if err := h.playbookRepo.ForceDelete(id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 			return
 		}
 		c.Status(http.StatusNoContent)
@@ -1074,21 +843,13 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 	// Check for dependencies before deleting
 	templateCount, err := h.playbookRepo.CountJobTemplatesByPlaybook(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to check dependencies: %v", err)},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to check dependencies: %v", err))
 		return
 	}
 
 	jobCount, err := h.playbookRepo.CountJobsByPlaybook(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to check dependencies: %v", err)},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to check dependencies: %v", err))
 		return
 	}
 
@@ -1100,11 +861,7 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 		if jobCount > 0 {
 			deps = append(deps, fmt.Sprintf("%d job(s)", jobCount))
 		}
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{"status": "409", "title": "Conflict", "detail": fmt.Sprintf("Cannot delete playbook: it is referenced by %s. Remove the playbook from those resources first", strings.Join(deps, ", "))},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", fmt.Sprintf("Cannot delete playbook: it is referenced by %s. Remove the playbook from those resources first", strings.Join(deps, ", ")))
 		return
 	}
 
@@ -1112,19 +869,11 @@ func (h *PlaybookHandler) DeletePlaybook(c *gin.Context) {
 		// Check for foreign key constraint violation (fallback)
 		errStr := err.Error()
 		if strings.Contains(errStr, "violates foreign key constraint") {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{"status": "409", "title": "Conflict", "detail": "Cannot delete playbook: it is referenced by one or more job templates or jobs. Remove the playbook from those resources first."},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Cannot delete playbook: it is referenced by one or more job templates or jobs. Remove the playbook from those resources first.")
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to delete playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete playbook")
 		return
 	}
 
@@ -1137,32 +886,20 @@ func (h *PlaybookHandler) SyncPlaybook(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	playbook, err := h.playbookRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Playbook not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Playbook not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1174,29 +911,17 @@ func (h *PlaybookHandler) SyncPlaybook(c *gin.Context) {
 		&playbook.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to sync this playbook"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to sync this playbook")
 		return
 	}
 
 	// Check if playbook has VCS configuration
 	if playbook.VCSConnectionID == nil || playbook.VCSRepository == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Playbook has no VCS connection configured"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Playbook has no VCS connection configured")
 		return
 	}
 
@@ -1204,11 +929,7 @@ func (h *PlaybookHandler) SyncPlaybook(c *gin.Context) {
 	playbook.LastSyncStatus = "syncing"
 	playbook.LastSyncError = ""
 	if err := h.playbookRepo.Update(playbook); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to update sync status"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update sync status")
 		return
 	}
 
@@ -1223,18 +944,12 @@ func (h *PlaybookHandler) SyncPlaybook(c *gin.Context) {
 				logger.Warnf("Failed to update playbook after sync queue error: %v", updateErr)
 			}
 
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to queue sync job"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to queue sync job")
 			return
 		}
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"data": formatPlaybookResponse(playbook),
-	})
+	jsonapi.WriteDocument(c, http.StatusAccepted, formatPlaybookResponse(playbook))
 }
 
 // ListTemplates lists all job templates for a project
@@ -1243,22 +958,14 @@ func (h *PlaybookHandler) ListTemplates(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	// RBAC: check project-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1270,19 +977,11 @@ func (h *PlaybookHandler) ListTemplates(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list job templates in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list job templates in this project")
 		return
 	}
 
@@ -1295,25 +994,11 @@ func (h *PlaybookHandler) ListTemplates(c *gin.Context) {
 
 	templates, total, err := h.templateRepo.ListByProject(projectID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list job templates"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list job templates")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobTemplatesResponse(templates),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobTemplatesResponse(templates), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // ListTemplatesByOrganization lists all job templates for an organization
@@ -1322,39 +1007,23 @@ func (h *PlaybookHandler) ListTemplatesByOrganization(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list job templates in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list job templates in this organization")
 		return
 	}
 
@@ -1367,25 +1036,11 @@ func (h *PlaybookHandler) ListTemplatesByOrganization(c *gin.Context) {
 
 	templates, total, err := h.templateRepo.ListByOrganization(org.ID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list job templates"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list job templates")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobTemplatesResponse(templates),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobTemplatesResponse(templates), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetTemplate retrieves a job template by ID
@@ -1394,32 +1049,20 @@ func (h *PlaybookHandler) GetTemplate(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job template ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job template ID")
 		return
 	}
 
 	template, err := h.templateRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job template not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job template not found")
 		return
 	}
 
 	// RBAC: check resource-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1431,25 +1074,15 @@ func (h *PlaybookHandler) GetTemplate(c *gin.Context) {
 		&template.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to view this job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to view this job template")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobTemplateResponse(template),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatJobTemplateResponse(template))
 }
 
 // CreateTemplate creates a new job template
@@ -1458,22 +1091,14 @@ func (h *PlaybookHandler) CreateTemplate(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	// RBAC: check project-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1485,51 +1110,31 @@ func (h *PlaybookHandler) CreateTemplate(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create job templates in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create job templates in this project")
 		return
 	}
 
 	var req CreateJobTemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	// Parse playbook ID
 	playbookID, err := uuid.Parse(req.Data.Relationships.Playbook.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	// Parse inventory ID
 	inventoryID, err := uuid.Parse(req.Data.Relationships.Inventory.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -1538,11 +1143,7 @@ func (h *PlaybookHandler) CreateTemplate(c *gin.Context) {
 	for _, ref := range req.Data.Relationships.Credentials.Data {
 		cid, err := uuid.Parse(ref.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid credential ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid credential ID")
 			return
 		}
 		credentialIDs = append(credentialIDs, cid)
@@ -1553,20 +1154,12 @@ func (h *PlaybookHandler) CreateTemplate(c *gin.Context) {
 	if req.Data.Relationships.AgentPool.Data != nil {
 		apid, err := uuid.Parse(req.Data.Relationships.AgentPool.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid agent pool ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid agent pool ID")
 			return
 		}
 		project, err := h.projectRepo.GetByID(projectID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		if !h.validateAgentPoolInOrg(c, apid, project.OrganizationID) {
@@ -1606,19 +1199,13 @@ func (h *PlaybookHandler) CreateTemplate(c *gin.Context) {
 	}
 
 	if err := h.templateRepo.Create(template); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to create job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create job template")
 		return
 	}
 
 	h.applyTemplateCredentials(c, template, credentialIDs)
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobTemplateResponse(template),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobTemplateResponse(template))
 }
 
 // CreateTemplateByOrganization creates a new job template (org-scoped, TFE-compatible pattern)
@@ -1627,49 +1214,29 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create job templates in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create job templates in this organization")
 		return
 	}
 
 	var req CreateJobTemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -1678,21 +1245,13 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	if req.Data.Relationships.Project.Data != nil && req.Data.Relationships.Project.Data.ID != "" {
 		pid, err := uuid.Parse(req.Data.Relationships.Project.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		// Validate project belongs to organization
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to this organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to this organization")
 			return
 		}
 		projectID = pid
@@ -1700,11 +1259,7 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 		// Use first project in organization (TFE-compatible behavior)
 		projects, _, err := h.projectRepo.ListByOrganization(org.ID, 1, 0)
 		if err != nil || len(projects) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Organization must have at least one project to create job templates"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Organization must have at least one project to create job templates")
 			return
 		}
 		projectID = projects[0].ID
@@ -1713,22 +1268,14 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	// Parse playbook ID
 	playbookID, err := uuid.Parse(req.Data.Relationships.Playbook.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	// Parse inventory ID
 	inventoryID, err := uuid.Parse(req.Data.Relationships.Inventory.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -1737,11 +1284,7 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	for _, ref := range req.Data.Relationships.Credentials.Data {
 		cid, err := uuid.Parse(ref.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid credential ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid credential ID")
 			return
 		}
 		credentialIDs = append(credentialIDs, cid)
@@ -1752,11 +1295,7 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	if req.Data.Relationships.AgentPool.Data != nil {
 		apid, err := uuid.Parse(req.Data.Relationships.AgentPool.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid agent pool ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid agent pool ID")
 			return
 		}
 		if !h.validateAgentPoolInOrg(c, apid, org.ID) {
@@ -1796,19 +1335,13 @@ func (h *PlaybookHandler) CreateTemplateByOrganization(c *gin.Context) {
 	}
 
 	if err := h.templateRepo.Create(template); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to create job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create job template")
 		return
 	}
 
 	h.applyTemplateCredentials(c, template, credentialIDs)
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobTemplateResponse(template),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobTemplateResponse(template))
 }
 
 // UpdateTemplate updates a job template
@@ -1817,32 +1350,20 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job template ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job template ID")
 		return
 	}
 
 	template, err := h.templateRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job template not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job template not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -1854,29 +1375,17 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 		&template.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to update this job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to update this job template")
 		return
 	}
 
 	var req UpdateJobTemplateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -1953,7 +1462,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 		if template.AllowCallbacks && template.HostConfigKey == "" {
 			key, err := generateHostConfigKey()
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to generate host config key"}}})
+				jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to generate host config key")
 				return
 			}
 			template.HostConfigKey = key
@@ -1964,20 +1473,12 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 	if req.Data.Relationships.Playbook.Data != nil {
 		pbid, err := uuid.Parse(req.Data.Relationships.Playbook.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 			return
 		}
 		playbook, err := h.playbookRepo.GetByID(pbid)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Playbook not found"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Playbook not found")
 			return
 		}
 		// The organization is the tenant boundary: the UI lists playbooks
@@ -1987,11 +1488,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 			tplProject, tplErr := h.projectRepo.GetByID(template.ProjectID)
 			pbProject, pbErr := h.projectRepo.GetByID(playbook.ProjectID)
 			if tplErr != nil || pbErr != nil || tplProject.OrganizationID != pbProject.OrganizationID {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{"status": "400", "title": "Bad Request", "detail": "Playbook does not belong to this template's organization"},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Playbook does not belong to this template's organization")
 				return
 			}
 		}
@@ -2002,11 +1499,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 	if req.Data.Relationships.Inventory.Data != nil {
 		iid, err := uuid.Parse(req.Data.Relationships.Inventory.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 			return
 		}
 		logger.Debugf("UpdateTemplate: Setting InventoryID from %s to %s", template.InventoryID.String(), iid.String())
@@ -2023,11 +1516,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 		} else {
 			apid, err := uuid.Parse(req.Data.Relationships.AgentPool.Data.ID)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{"status": "400", "title": "Bad Request", "detail": "Invalid agent pool ID"},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid agent pool ID")
 				return
 			}
 			if !h.validateAgentPoolInOrg(c, apid, template.Project.OrganizationID) {
@@ -2045,11 +1534,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 		for _, ref := range req.Data.Relationships.Credentials.Data {
 			cid, err := uuid.Parse(ref.ID)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{
-					"errors": []gin.H{
-						{"status": "400", "title": "Bad Request", "detail": "Invalid credential ID"},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid credential ID")
 				return
 			}
 			credentialIDs = append(credentialIDs, cid)
@@ -2058,11 +1543,7 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 
 	logger.Debugf("UpdateTemplate: Before Save - InventoryID: %s", template.InventoryID.String())
 	if err := h.templateRepo.Update(template); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to update job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update job template")
 		return
 	}
 
@@ -2084,19 +1565,13 @@ func (h *PlaybookHandler) UpdateTemplate(c *gin.Context) {
 	// Reload the template from database to get updated relationships
 	updatedTemplate, err := h.templateRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to reload updated job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to reload updated job template")
 		return
 	}
 
 	logger.Debugf("UpdateTemplate: After reload - InventoryID: %s", updatedTemplate.InventoryID.String())
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobTemplateResponse(updatedTemplate),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatJobTemplateResponse(updatedTemplate))
 }
 
 // DeleteTemplate deletes a job template
@@ -2105,33 +1580,21 @@ func (h *PlaybookHandler) DeleteTemplate(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job template ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job template ID")
 		return
 	}
 
 	// Fetch template to get ProjectID for RBAC check
 	template, err := h.templateRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job template not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job template not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckAnsibleResourcePermission(
@@ -2143,49 +1606,29 @@ func (h *PlaybookHandler) DeleteTemplate(c *gin.Context) {
 		&template.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to delete this job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to delete this job template")
 		return
 	}
 
 	// Cascade delete: first delete all schedules that reference this template
 	if err := h.scheduleRepo.DeleteByJobTemplate(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to delete associated schedules"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete associated schedules")
 		return
 	}
 
 	// Then delete all jobs that were created from this template
 	if err := h.jobRepo.DeleteByTemplateID(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to delete associated jobs"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete associated jobs")
 		return
 	}
 
 	// Finally delete the template itself
 	if err := h.templateRepo.Delete(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to delete job template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete job template")
 		return
 	}
 
@@ -2193,7 +1636,7 @@ func (h *PlaybookHandler) DeleteTemplate(c *gin.Context) {
 }
 
 // formatPlaybookResponse formats a playbook for JSON:API response
-func formatPlaybookResponse(playbook *models.AnsiblePlaybook) gin.H {
+func formatPlaybookResponse(playbook *models.AnsiblePlaybook) jsonapi.Resource[PlaybookAttributes] {
 	// Derive VCS provider and account name from the preloaded VCSConnection
 	vcsProvider := ""
 	vcsAccountName := ""
@@ -2202,62 +1645,51 @@ func formatPlaybookResponse(playbook *models.AnsiblePlaybook) gin.H {
 		vcsAccountName = playbook.VCSConnection.AccountName
 	}
 
-	attributes := gin.H{
-		"name":              playbook.Name,
-		"description":       playbook.Description,
-		"vcs-repository":    playbook.VCSRepository,
-		"vcs-branch":        playbook.VCSBranch,
-		"vcs-provider":      vcsProvider,
-		"vcs-account-name":  vcsAccountName,
-		"playbook-path":     playbook.PlaybookPath,
-		"source-mode":       playbook.SourceMode,
-		"last-sync-at":      nil,
-		"last-sync-status":  playbook.LastSyncStatus,
-		"last-sync-commit":  playbook.LastSyncCommit,
-		"last-sync-error":   playbook.LastSyncError,
-		"cached-commit":     playbook.CachedCommit,
-		"cached-at":         nil,
-		"cached-size-bytes": playbook.CachedSizeBytes,
-		"created-at":        playbook.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":        playbook.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+	attributes := PlaybookAttributes{
+		Name:            playbook.Name,
+		Description:     playbook.Description,
+		VCSRepository:   playbook.VCSRepository,
+		VCSBranch:       playbook.VCSBranch,
+		VCSProvider:     vcsProvider,
+		VCSAccountName:  vcsAccountName,
+		PlaybookPath:    playbook.PlaybookPath,
+		SourceMode:      playbook.SourceMode,
+		LastSyncStatus:  playbook.LastSyncStatus,
+		LastSyncCommit:  playbook.LastSyncCommit,
+		LastSyncError:   playbook.LastSyncError,
+		CachedCommit:    playbook.CachedCommit,
+		CachedSizeBytes: playbook.CachedSizeBytes,
+		CreatedAt:       playbook.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:       playbook.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
-
 	if playbook.LastSyncAt != nil {
-		attributes["last-sync-at"] = playbook.LastSyncAt.Format("2006-01-02T15:04:05Z")
+		v := playbook.LastSyncAt.Format("2006-01-02T15:04:05Z")
+		attributes.LastSyncAt = &v
 	}
 	if playbook.CachedAt != nil {
-		attributes["cached-at"] = playbook.CachedAt.Format("2006-01-02T15:04:05Z")
+		v := playbook.CachedAt.Format("2006-01-02T15:04:05Z")
+		attributes.CachedAt = &v
 	}
 
-	relationships := gin.H{
-		"project": gin.H{
-			"data": gin.H{
-				"id":   playbook.ProjectID.String(),
-				"type": "projects",
-			},
-		},
+	relationships := PlaybookRelationships{
+		Project: jsonapi.ToOne(playbook.ProjectID.String(), "projects"),
 	}
-
 	if playbook.VCSConnectionID != nil {
-		relationships["vcs-connection"] = gin.H{
-			"data": gin.H{
-				"id":   playbook.VCSConnectionID.String(),
-				"type": "vcs-connections",
-			},
-		}
+		r := jsonapi.ToOne(playbook.VCSConnectionID.String(), "vcs-connections")
+		relationships.VCSConnection = &r
 	}
 
-	return gin.H{
-		"id":            playbook.ID.String(),
-		"type":          "ansible-playbooks",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return jsonapi.Resource[PlaybookAttributes]{
+		ID:            playbook.ID.String(),
+		Type:          "ansible-playbooks",
+		Attributes:    attributes,
+		Relationships: relationships,
 	}
 }
 
 // formatPlaybooksResponse formats multiple playbooks for JSON:API response
-func formatPlaybooksResponse(playbooks []models.AnsiblePlaybook) []gin.H {
-	result := make([]gin.H, len(playbooks))
+func formatPlaybooksResponse(playbooks []models.AnsiblePlaybook) []jsonapi.Resource[PlaybookAttributes] {
+	result := make([]jsonapi.Resource[PlaybookAttributes], len(playbooks))
 	for i, playbook := range playbooks {
 		result[i] = formatPlaybookResponse(&playbook)
 	}
@@ -2295,79 +1727,58 @@ func (h *PlaybookHandler) applyTemplateCredentials(c *gin.Context, template *mod
 	_ = c
 }
 
-func formatJobTemplateResponse(template *models.AnsibleJobTemplate) gin.H {
-	relationships := gin.H{
-		"project": gin.H{
-			"data": gin.H{
-				"id":   template.ProjectID.String(),
-				"type": "projects",
-			},
-		},
-		"playbook": gin.H{
-			"data": gin.H{
-				"id":   template.PlaybookID.String(),
-				"type": "ansible-playbooks",
-			},
-		},
-		"inventory": gin.H{
-			"data": gin.H{
-				"id":   template.InventoryID.String(),
-				"type": "ansible-inventories",
-			},
-		},
+func formatJobTemplateResponse(template *models.AnsibleJobTemplate) jsonapi.Resource[JobTemplateAttributes] {
+	relationships := JobTemplateRelationships{
+		Project:   jsonapi.ToOne(template.ProjectID.String(), "projects"),
+		Playbook:  jsonapi.ToOne(template.PlaybookID.String(), "ansible-playbooks"),
+		Inventory: jsonapi.ToOne(template.InventoryID.String(), "ansible-inventories"),
 	}
-
 	if len(template.Credentials) > 0 {
-		refs := make([]gin.H, 0, len(template.Credentials))
+		refs := make([]jsonapi.ResourceID, 0, len(template.Credentials))
 		for _, cred := range template.Credentials {
-			refs = append(refs, gin.H{"id": cred.ID.String(), "type": "ansible-credentials"})
+			refs = append(refs, jsonapi.ResourceID{ID: cred.ID.String(), Type: "ansible-credentials"})
 		}
-		relationships["credentials"] = gin.H{"data": refs}
+		relationships.Credentials = &jsonapi.ManyRelationship{Data: refs}
 	}
-
 	if template.AgentPoolID != nil {
-		relationships["agent-pool"] = gin.H{
-			"data": gin.H{
-				"id":   template.AgentPoolID.String(),
-				"type": "agent-pools",
-			},
-		}
+		r := jsonapi.ToOne(template.AgentPoolID.String(), "agent-pools")
+		relationships.AgentPool = &r
 	}
 
-	return gin.H{
-		"id":   template.ID.String(),
-		"type": "ansible-job-templates",
-		"attributes": gin.H{
-			"name":               template.Name,
-			"description":        template.Description,
-			"extra-vars":         template.ExtraVars,
-			"limit":              template.Limit,
-			"tags":               template.Tags,
-			"skip-tags":          template.SkipTags,
-			"verbosity":          template.Verbosity,
-			"forks":              template.Forks,
-			"become-enabled":     template.BecomeEnabled,
-			"diff-mode":          template.DiffMode,
-			"schedule-enabled":   template.ScheduleEnabled,
-			"schedule-cron":      template.ScheduleCron,
-			"enabled":            !template.Disabled,
-			"timeout-seconds":    template.TimeoutSeconds,
-			"allow-simultaneous": template.AllowSimultaneous,
-			"retention-days":     template.RetentionDays,
-			"job-slice-count":    template.JobSliceCount,
-			"allow-callbacks":    template.AllowCallbacks,
-			"launch-on-webhook":  template.LaunchOnWebhook,
-			"host-config-key":    template.HostConfigKey,
-			"created-at":         template.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			"updated-at":         template.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+	return jsonapi.Resource[JobTemplateAttributes]{
+		ID:   template.ID.String(),
+		Type: "ansible-job-templates",
+		Attributes: JobTemplateAttributes{
+			Name:              template.Name,
+			Description:       template.Description,
+			ExtraVars:         template.ExtraVars,
+			Limit:             template.Limit,
+			Tags:              template.Tags,
+			SkipTags:          template.SkipTags,
+			Verbosity:         template.Verbosity,
+			Forks:             template.Forks,
+			BecomeEnabled:     template.BecomeEnabled,
+			DiffMode:          template.DiffMode,
+			ScheduleEnabled:   template.ScheduleEnabled,
+			ScheduleCron:      template.ScheduleCron,
+			Enabled:           !template.Disabled,
+			TimeoutSeconds:    template.TimeoutSeconds,
+			AllowSimultaneous: template.AllowSimultaneous,
+			RetentionDays:     template.RetentionDays,
+			JobSliceCount:     template.JobSliceCount,
+			AllowCallbacks:    template.AllowCallbacks,
+			LaunchOnWebhook:   template.LaunchOnWebhook,
+			HostConfigKey:     template.HostConfigKey,
+			CreatedAt:         template.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:         template.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		},
-		"relationships": relationships,
+		Relationships: relationships,
 	}
 }
 
 // formatJobTemplatesResponse formats multiple job templates for JSON:API response
-func formatJobTemplatesResponse(templates []models.AnsibleJobTemplate) []gin.H {
-	result := make([]gin.H, len(templates))
+func formatJobTemplatesResponse(templates []models.AnsibleJobTemplate) []jsonapi.Resource[JobTemplateAttributes] {
+	result := make([]jsonapi.Resource[JobTemplateAttributes], len(templates))
 	for i, template := range templates {
 		result[i] = formatJobTemplateResponse(&template)
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -59,48 +60,58 @@ func NewOIDCConfigDispatchHandler(
 func (h *OIDCConfigDispatchHandler) List(c *gin.Context) {
 	org, err := h.orgRepo.GetByName(c.Param("name"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Organization not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	ok, err := h.rbacService.CheckOrgManageVCSSettings(c.Request.Context(), user.ID, org.ID)
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to read OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to read OIDC configurations")
 		return
 	}
 
-	data := make([]gin.H, 0)
+	// One list, four resource types: each element is a typed Resource of its own cloud's
+	// attribute block, so only the container is heterogeneous.
+	data := make([]any, 0)
 	azureData, err := h.azure.listData(org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list OIDC configurations")
 		return
 	}
-	data = append(data, azureData...)
+	for i := range azureData {
+		data = append(data, azureData[i])
+	}
 	awsData, err := h.aws.listData(org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list OIDC configurations")
 		return
 	}
-	data = append(data, awsData...)
+	for i := range awsData {
+		data = append(data, awsData[i])
+	}
 	gcpData, err := h.gcp.listData(org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list OIDC configurations")
 		return
 	}
-	data = append(data, gcpData...)
+	for i := range gcpData {
+		data = append(data, gcpData[i])
+	}
 	vaultData, err := h.vault.listData(org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list OIDC configurations")
 		return
 	}
-	data = append(data, vaultData...)
+	for i := range vaultData {
+		data = append(data, vaultData[i])
+	}
 
-	c.JSON(http.StatusOK, gin.H{"data": data})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewFullPageMeta(len(data)))
 }
 
 // Create dispatches to the provider handler named by the request's data.type.
@@ -109,7 +120,7 @@ func (h *OIDCConfigDispatchHandler) Create(c *gin.Context) {
 	// Peek data.type without consuming the body, then restore it for the delegate's ShouldBindJSON.
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Failed to read request body"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Failed to read request body")
 		return
 	}
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
@@ -131,7 +142,7 @@ func (h *OIDCConfigDispatchHandler) Create(c *gin.Context) {
 	case vaultOIDCConfigType:
 		h.vault.Create(c)
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "data.type must be one of: " + azureOIDCConfigType + ", " + awsOIDCConfigType + ", " + gcpOIDCConfigType + ", " + vaultOIDCConfigType}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "data.type must be one of: "+azureOIDCConfigType+", "+awsOIDCConfigType+", "+gcpOIDCConfigType+", "+vaultOIDCConfigType)
 	}
 }
 
@@ -206,5 +217,5 @@ func (h *OIDCConfigDispatchHandler) providerForID(id string) any {
 }
 
 func oidcUnknownID(c *gin.Context) {
-	c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "OIDC configuration not found"}}})
+	jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "OIDC configuration not found")
 }

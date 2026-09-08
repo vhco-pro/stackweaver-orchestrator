@@ -4,10 +4,10 @@ package handlers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -39,26 +39,29 @@ func NewTagBindingHandlerV2(tagRepo *repository.TagBindingRepository, projectRep
 }
 
 func tagErr(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{"errors": []gin.H{{"status": strconv.Itoa(status), "title": title, "detail": detail}}})
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // formatTagBindings renders a list of tag bindings as JSON:API. resourceType is "tag-bindings" or
 // "effective-tag-bindings". Effective bindings get a synthetic id (their key) since they are computed.
-func formatTagBindings(bindings []models.TagBinding, resourceType string) gin.H {
-	data := make([]gin.H, 0, len(bindings))
+func formatTagBindings(bindings []models.TagBinding, resourceType string) jsonapi.Document {
+	data := make([]jsonapi.Resource[TagBindingAttributes], 0, len(bindings))
 	for i := range bindings {
 		b := bindings[i]
 		id := b.ID
 		if id == "" {
 			id = b.Key // effective bindings are synthetic
 		}
-		data = append(data, gin.H{
-			"type":       resourceType,
-			"id":         id,
-			"attributes": gin.H{"key": b.Key, "value": b.Value},
+		data = append(data, jsonapi.Resource[TagBindingAttributes]{
+			ID:         id,
+			Type:       resourceType,
+			Attributes: TagBindingAttributes{Key: b.Key, Value: b.Value},
 		})
 	}
-	return gin.H{"data": data}
+	// Every caller lists the resource's bindings in full, so one page holding all of them is
+	// the honest block. Building it here rather than at the six call sites keeps the GET and
+	// PATCH responses identical in shape, which is what they were before.
+	return jsonapi.Document{Data: data, Meta: jsonapi.NewFullPageMeta(len(data))}
 }
 
 // tagBindingsRequest is the PATCH body - a JSON:API list of tag-bindings (go-tfe AddTagBindings).
@@ -82,29 +85,33 @@ func (r tagBindingsRequest) toBindings() []models.TagBinding {
 
 // TagBindingsRelationship renders the tag-bindings / effective-tag-bindings relationship object for a
 // project/workspace response (a list of {type,id} linkages).
-func TagBindingsRelationship(bindings []models.TagBinding, resourceType string) gin.H {
-	data := make([]gin.H, 0, len(bindings))
+func TagBindingsRelationship(bindings []models.TagBinding, resourceType string) jsonapi.ManyRelationship {
+	data := make([]jsonapi.ResourceID, 0, len(bindings))
 	for i := range bindings {
 		id := bindings[i].ID
 		if id == "" {
 			id = bindings[i].Key
 		}
-		data = append(data, gin.H{"type": resourceType, "id": id})
+		data = append(data, jsonapi.ResourceID{ID: id, Type: resourceType})
 	}
-	return gin.H{"data": data}
+	return jsonapi.ManyRelationship{Data: data}
 }
 
 // IncludedTagBindingResources renders tag-bindings as JSON:API `included` resource objects (for
 // ?include= responses).
-func IncludedTagBindingResources(bindings []models.TagBinding, resourceType string) []gin.H {
-	out := make([]gin.H, 0, len(bindings))
+func IncludedTagBindingResources(bindings []models.TagBinding, resourceType string) []jsonapi.Resource[TagBindingAttributes] {
+	out := make([]jsonapi.Resource[TagBindingAttributes], 0, len(bindings))
 	for i := range bindings {
 		b := bindings[i]
 		id := b.ID
 		if id == "" {
 			id = b.Key
 		}
-		out = append(out, gin.H{"type": resourceType, "id": id, "attributes": gin.H{"key": b.Key, "value": b.Value}})
+		out = append(out, jsonapi.Resource[TagBindingAttributes]{
+			ID:         id,
+			Type:       resourceType,
+			Attributes: TagBindingAttributes{Key: b.Key, Value: b.Value},
+		})
 	}
 	return out
 }

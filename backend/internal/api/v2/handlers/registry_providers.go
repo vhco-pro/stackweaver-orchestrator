@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/registry"
 	"github.com/michielvha/stackweaver/core/models"
@@ -107,25 +108,20 @@ func (h *RegistryProviderHandler) ListProviders(c *gin.Context) {
 
 	providers, total, err := h.providerService.ListProviders(namespace, verified, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{"Failed to list providers"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusInternalServerError, "Failed to list providers")
 		return
 	}
 	providers = h.filterAccessibleProviders(c, providers)
 
 	// Format response according to Terraform Registry API spec
-	response := gin.H{
-		"meta": gin.H{
-			"limit":          limit,
-			"current_offset": offset,
-		},
-		"providers": formatProviders(providers),
+	response := RegistryProviderListResponse{
+		Meta:      RegistryListMeta{Limit: limit, CurrentOffset: offset},
+		Providers: formatProviders(providers),
 	}
 
 	if offset+limit < int(total) {
-		response["meta"].(gin.H)["next_offset"] = offset + limit
-		response["meta"].(gin.H)["next_url"] = c.Request.URL.Path + "?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(offset+limit)
+		response.Meta.NextOffset = offset + limit
+		response.Meta.NextURL = c.Request.URL.Path + "?limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(offset+limit)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -135,9 +131,7 @@ func (h *RegistryProviderHandler) ListProviders(c *gin.Context) {
 func (h *RegistryProviderHandler) SearchProviders(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []string{"Query parameter 'q' is required"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusBadRequest, "Query parameter 'q' is required")
 		return
 	}
 
@@ -162,24 +156,19 @@ func (h *RegistryProviderHandler) SearchProviders(c *gin.Context) {
 
 	providers, total, err := h.providerService.SearchProviders(query, namespace, verified, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{"Failed to search providers"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusInternalServerError, "Failed to search providers")
 		return
 	}
 	providers = h.filterAccessibleProviders(c, providers)
 
-	response := gin.H{
-		"meta": gin.H{
-			"limit":          limit,
-			"current_offset": offset,
-		},
-		"providers": formatProviders(providers),
+	response := RegistryProviderListResponse{
+		Meta:      RegistryListMeta{Limit: limit, CurrentOffset: offset},
+		Providers: formatProviders(providers),
 	}
 
 	if offset+limit < int(total) {
-		response["meta"].(gin.H)["next_offset"] = offset + limit
-		response["meta"].(gin.H)["next_url"] = c.Request.URL.Path + "?q=" + query + "&limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(offset+limit)
+		response.Meta.NextOffset = offset + limit
+		response.Meta.NextURL = c.Request.URL.Path + "?q=" + query + "&limit=" + strconv.Itoa(limit) + "&offset=" + strconv.Itoa(offset+limit)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -192,9 +181,7 @@ func (h *RegistryProviderHandler) GetProviderVersions(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeProviderRead(c, provider) {
@@ -203,33 +190,26 @@ func (h *RegistryProviderHandler) GetProviderVersions(c *gin.Context) {
 
 	versions, err := h.providerService.GetProviderVersions(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 
 	// Format response according to Terraform Registry API spec
-	versionList := make([]gin.H, len(versions))
+	versionList := make([]ProviderVersionEntry, len(versions))
 	for i, v := range versions {
-		platforms := make([]gin.H, len(v.Platforms))
+		platforms := make([]ProviderPlatform, len(v.Platforms))
 		for j, p := range v.Platforms {
-			platforms[j] = gin.H{
-				"os":   p.OS,
-				"arch": p.Arch,
-			}
+			platforms[j] = ProviderPlatform{OS: p.OS, Arch: p.Arch}
 		}
 
-		versionList[i] = gin.H{
-			"version":   v.Version,
-			"protocols": protocolList(v.Protocols),
-			"platforms": platforms,
+		versionList[i] = ProviderVersionEntry{
+			Version:   v.Version,
+			Protocols: protocolList(v.Protocols),
+			Platforms: platforms,
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"versions": versionList,
-	})
+	c.JSON(http.StatusOK, ProviderVersionsResponse{Versions: versionList})
 }
 
 // GetProvider handles GET /v1/providers/:namespace/:name (latest version)
@@ -239,9 +219,7 @@ func (h *RegistryProviderHandler) GetProvider(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeProviderRead(c, provider) {
@@ -250,9 +228,7 @@ func (h *RegistryProviderHandler) GetProvider(c *gin.Context) {
 
 	latestVersion, err := h.providerService.GetLatestVersion(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"No versions found for this provider"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "No versions found for this provider")
 		return
 	}
 
@@ -268,9 +244,7 @@ func (h *RegistryProviderHandler) GetProviderVersion(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeProviderRead(c, provider) {
@@ -279,9 +253,7 @@ func (h *RegistryProviderHandler) GetProviderVersion(c *gin.Context) {
 
 	providerVersion, err := h.providerService.GetProviderVersion(namespace, name, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider version not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider version not found")
 		return
 	}
 
@@ -307,7 +279,7 @@ func (h *RegistryProviderHandler) DownloadProvider(c *gin.Context) {
 	if version == "" {
 		latestVersion, err := h.providerService.GetLatestVersion(namespace, name)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider or version not found"}})
+			jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider or version not found")
 			return
 		}
 		version = latestVersion.Version
@@ -315,7 +287,7 @@ func (h *RegistryProviderHandler) DownloadProvider(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeProviderRead(c, provider) {
@@ -323,7 +295,7 @@ func (h *RegistryProviderHandler) DownloadProvider(c *gin.Context) {
 	}
 	providerVersion, err := h.providerService.GetProviderVersion(namespace, name, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider version not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider version not found")
 		return
 	}
 
@@ -335,21 +307,20 @@ func (h *RegistryProviderHandler) DownloadProvider(c *gin.Context) {
 		}
 	}
 	if platform == nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider binary not available for this platform"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider binary not available for this platform")
 		return
 	}
 
 	// Resolve the signing key advertised to Terraform (the public half uploaded via
 	// tfe_registry_gpg_key that the publisher signed SHA256SUMS with).
-	gpgKeys := make([]gin.H, 0, 1)
+	gpgKeys := make([]GPGPublicKey, 0, 1)
 	if providerVersion.KeyID != "" {
 		if key, kerr := h.gpgKeyRepo.GetByKeyID(provider.OrganizationID, providerVersion.KeyID); kerr == nil && key != nil {
-			gpgKeys = append(gpgKeys, gin.H{
-				"key_id":          key.KeyID,
-				"ascii_armor":     key.ASCIIArmor,
-				"trust_signature": "",
-				"source":          "",
-				"source_url":      nil,
+			gpgKeys = append(gpgKeys, GPGPublicKey{
+				KeyID:      key.KeyID,
+				ASCIIArmor: key.ASCIIArmor,
+				// TrustSignature and Source stay empty; SourceURL stays nil so the protocol
+				// sends JSON null, which Terraform distinguishes from an empty string.
 			})
 		}
 	}
@@ -373,16 +344,16 @@ func (h *RegistryProviderHandler) DownloadProvider(c *gin.Context) {
 		_ = h.providerService.TrackDownload(platformID, ip, ua)
 	}()
 
-	c.JSON(http.StatusOK, gin.H{
-		"protocols":             protocolList(providerVersion.Protocols),
-		"os":                    platform.OS,
-		"arch":                  platform.Arch,
-		"filename":              platform.Filename,
-		"download_url":          fmt.Sprintf("%s/binary/%s/%s%s", base, osParam, arch, artifactQuery),
-		"shasums_url":           base + "/sha256sums" + artifactQuery,
-		"shasums_signature_url": base + "/sha256sums.sig" + artifactQuery,
-		"shasum":                platform.Shasum,
-		"signing_keys":          gin.H{"gpg_public_keys": gpgKeys},
+	c.JSON(http.StatusOK, ProviderDownloadResponse{
+		Protocols:           protocolList(providerVersion.Protocols),
+		OS:                  platform.OS,
+		Arch:                platform.Arch,
+		Filename:            platform.Filename,
+		DownloadURL:         fmt.Sprintf("%s/binary/%s/%s%s", base, osParam, arch, artifactQuery),
+		ShasumsURL:          base + "/sha256sums" + artifactQuery,
+		ShasumsSignatureURL: base + "/sha256sums.sig" + artifactQuery,
+		Shasum:              platform.Shasum,
+		SigningKeys:         SigningKeys{GPGPublicKeys: gpgKeys},
 	})
 }
 
@@ -396,7 +367,7 @@ func (h *RegistryProviderHandler) DownloadBinary(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeArtifact(c, provider, namespace, name, version) {
@@ -405,7 +376,7 @@ func (h *RegistryProviderHandler) DownloadBinary(c *gin.Context) {
 
 	providerVersion, err := h.providerService.GetProviderVersion(namespace, name, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider version not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider version not found")
 		return
 	}
 	for i := range providerVersion.Platforms {
@@ -415,7 +386,7 @@ func (h *RegistryProviderHandler) DownloadBinary(c *gin.Context) {
 			return
 		}
 	}
-	c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider binary not available for this platform"}})
+	jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider binary not available for this platform")
 }
 
 // DownloadShasums streams the SHA256SUMS file: GET /v1/providers/:namespace/:name/:version/sha256sums.
@@ -440,7 +411,7 @@ func (h *RegistryProviderHandler) versionForShasums(c *gin.Context) (*models.Pro
 	namespace, name, version := c.Param("namespace"), c.Param("name"), c.Param("version")
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return nil, false
 	}
 	if !h.authorizeArtifact(c, provider, namespace, name, version) {
@@ -448,11 +419,11 @@ func (h *RegistryProviderHandler) versionForShasums(c *gin.Context) (*models.Pro
 	}
 	pv, err := h.providerService.GetProviderVersion(namespace, name, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Provider version not found"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider version not found")
 		return nil, false
 	}
 	if pv.ShasumsPath == "" {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"SHA256SUMS not available for this version"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "SHA256SUMS not available for this version")
 		return nil, false
 	}
 	return pv, true
@@ -462,12 +433,12 @@ func (h *RegistryProviderHandler) versionForShasums(c *gin.Context) (*models.Pro
 // download filename.
 func (h *RegistryProviderHandler) streamObject(c *gin.Context, key, contentType, filename string) {
 	if key == "" {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Object not available"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Object not available")
 		return
 	}
 	obj, err := h.storage.GetStream(c.Request.Context(), key)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []string{"Object not available"}})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Object not available")
 		return
 	}
 	defer func() {
@@ -524,9 +495,7 @@ func (h *RegistryProviderHandler) GetProviderDownloadsSummary(c *gin.Context) {
 
 	provider, err := h.providerService.GetProvider(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Provider not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Provider not found")
 		return
 	}
 	if !h.authorizeProviderRead(c, provider) {
@@ -535,48 +504,40 @@ func (h *RegistryProviderHandler) GetProviderDownloadsSummary(c *gin.Context) {
 
 	latestVersion, err := h.providerService.GetLatestVersion(namespace, name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"No versions found for this provider"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "No versions found for this provider")
 		return
 	}
 
 	// Get stats for the first platform (or aggregate all platforms)
 	if len(latestVersion.Platforms) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"No platforms found for this provider version"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "No platforms found for this provider version")
 		return
 	}
 
 	// For now, use the first platform's stats
 	stats, err := h.providerService.GetDownloadStats(latestVersion.Platforms[0].ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{"Failed to get download statistics"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusInternalServerError, "Failed to get download statistics")
 		return
 	}
 
 	// Format according to Terraform Registry v2 API spec
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"type": "provider-downloads-summary",
-			"id":   latestVersion.ID.String(),
-			"attributes": gin.H{
-				"week":  stats["week"],
-				"month": stats["month"],
-				"year":  stats["year"],
-				"total": stats["total"],
-			},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[ProviderDownloadsSummaryAttributes]{
+		ID:   latestVersion.ID.String(),
+		Type: "provider-downloads-summary",
+		Attributes: ProviderDownloadsSummaryAttributes{
+			Week:  stats["week"],
+			Month: stats["month"],
+			Year:  stats["year"],
+			Total: stats["total"],
 		},
 	})
 }
 
 // Helper functions
 
-func formatProviders(providers []models.Provider) []gin.H {
-	result := make([]gin.H, 0, len(providers))
+func formatProviders(providers []models.Provider) []RegistryProviderSummary {
+	result := make([]RegistryProviderSummary, 0, len(providers))
 	for _, p := range providers {
 		// Get latest version for each provider
 		var latestVersion *models.ProviderVersion
@@ -585,28 +546,28 @@ func formatProviders(providers []models.Provider) []gin.H {
 		}
 
 		if latestVersion != nil {
-			result = append(result, gin.H{
-				"id":           p.Organization.Name + "/" + p.Name + "/" + latestVersion.Version,
-				"namespace":    p.Organization.Name,
-				"name":         p.Name,
-				"version":      latestVersion.Version,
-				"published_at": latestVersion.PublishedAt.Format("2006-01-02T15:04:05Z"),
-				"downloads":    latestVersion.Downloads,
-				"verified":     p.Verified,
+			result = append(result, RegistryProviderSummary{
+				ID:          p.Organization.Name + "/" + p.Name + "/" + latestVersion.Version,
+				Namespace:   p.Organization.Name,
+				Name:        p.Name,
+				Version:     latestVersion.Version,
+				PublishedAt: latestVersion.PublishedAt.Format("2006-01-02T15:04:05Z"),
+				Downloads:   latestVersion.Downloads,
+				Verified:    p.Verified,
 			})
 		}
 	}
 	return result
 }
 
-func formatProviderDetail(provider *models.Provider, version *models.ProviderVersion) gin.H {
-	platforms := make([]gin.H, len(version.Platforms))
+func formatProviderDetail(provider *models.Provider, version *models.ProviderVersion) RegistryProviderDetail {
+	platforms := make([]RegistryProviderPlatformEntry, len(version.Platforms))
 	for i, p := range version.Platforms {
-		platforms[i] = gin.H{
-			"os":       p.OS,
-			"arch":     p.Arch,
-			"shasum":   p.Shasum,
-			"filename": p.Filename,
+		platforms[i] = RegistryProviderPlatformEntry{
+			OS:       p.OS,
+			Arch:     p.Arch,
+			Shasum:   p.Shasum,
+			Filename: p.Filename,
 		}
 	}
 
@@ -616,15 +577,17 @@ func formatProviderDetail(provider *models.Provider, version *models.ProviderVer
 		allVersions[i] = v.Version
 	}
 
-	return gin.H{
-		"id":           provider.Organization.Name + "/" + provider.Name + "/" + version.Version,
-		"namespace":    provider.Organization.Name,
-		"name":         provider.Name,
-		"version":      version.Version,
-		"published_at": version.PublishedAt.Format("2006-01-02T15:04:05Z"),
-		"downloads":    version.Downloads,
-		"verified":     provider.Verified,
-		"platforms":    platforms,
-		"versions":     allVersions,
+	return RegistryProviderDetail{
+		RegistryProviderSummary: RegistryProviderSummary{
+			ID:          provider.Organization.Name + "/" + provider.Name + "/" + version.Version,
+			Namespace:   provider.Organization.Name,
+			Name:        provider.Name,
+			Version:     version.Version,
+			PublishedAt: version.PublishedAt.Format("2006-01-02T15:04:05Z"),
+			Downloads:   version.Downloads,
+			Verified:    provider.Verified,
+		},
+		Platforms: platforms,
+		Versions:  allVersions,
 	}
 }

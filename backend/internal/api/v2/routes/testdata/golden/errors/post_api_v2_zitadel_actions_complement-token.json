@@ -1,0 +1,14 @@
+{
+  "method": "POST",
+  "path": "/api/v2/zitadel/actions/complement-token",
+  "status": 401,
+  "body": {
+    "errors": [
+      {
+        "detail": "invalid signature",
+        "status": "401",
+        "title": "Unauthorized"
+      }
+    ]
+  }
+}

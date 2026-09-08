@@ -4,10 +4,10 @@ package ansible
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/response"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -50,7 +50,7 @@ func (h *InventorySyncHandler) authorizeInventoryRead(c *gin.Context, inventoryI
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return false
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, inventory.OrganizationID)
@@ -59,7 +59,7 @@ func (h *InventorySyncHandler) authorizeInventoryRead(c *gin.Context, inventoryI
 		return false
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You don't have permission to view this inventory's sync history"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to view this inventory's sync history")
 		return false
 	}
 	return true
@@ -78,20 +78,26 @@ func (h *InventorySyncHandler) List(c *gin.Context) {
 		return
 	}
 
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	// page[number]/page[size]. This used to read limit/offset while reporting a correct
+	// six-member block including the true total, which is the most dangerous combination there
+	// is: total-pages can exceed 1, so a client is invited to ask for page 2, and the offset it
+	// sends is never read - it gets page 1 again. That is the inventory-sources bug in #761,
+	// which rendered every row twice. It did not bite here only because the one caller sends
+	// ?limit=50 and never pages. Reporting a true total and honouring page[number] are one
+	// feature; this endpoint had the first half without the second.
+	page, perPage := jsonapi.PageParams(c, 20)
 
-	syncs, total, err := h.syncRepo.ListByInventory(inventoryID, limit, offset)
+	syncs, total, err := h.syncRepo.ListByInventory(inventoryID, perPage, jsonapi.Offset(page, perPage))
 	if err != nil {
 		response.InternalError(c, "Failed to list inventory syncs")
 		return
 	}
 
-	data := make([]gin.H, 0, len(syncs))
+	data := make([]jsonapi.Resource[InventorySyncAttributes], 0, len(syncs))
 	for i := range syncs {
 		data = append(data, formatInventorySyncResponse(&syncs[i], false))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "meta": gin.H{"total": total}})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // Get returns one sync run including its captured output.
@@ -112,42 +118,39 @@ func (h *InventorySyncHandler) Get(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatInventorySyncResponse(sync, true)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatInventorySyncResponse(sync, true))
 }
 
 // formatInventorySyncResponse formats a sync run for JSON:API responses.
 // Output is only included on detail fetches.
-func formatInventorySyncResponse(sync *models.AnsibleInventorySync, includeOutput bool) gin.H {
-	attrs := gin.H{
-		"status":            string(sync.Status),
-		"triggered-by":      sync.TriggeredBy,
-		"hosts-discovered":  sync.HostsDiscovered,
-		"groups-discovered": sync.GroupsDiscovered,
-		"error":             sync.Error,
-		"started-at":        sync.StartedAt,
-		"finished-at":       sync.FinishedAt,
-		"created-at":        sync.CreatedAt,
+func formatInventorySyncResponse(sync *models.AnsibleInventorySync, includeOutput bool) jsonapi.Resource[InventorySyncAttributes] {
+	attrs := InventorySyncAttributes{
+		Status:           string(sync.Status),
+		TriggeredBy:      sync.TriggeredBy,
+		HostsDiscovered:  sync.HostsDiscovered,
+		GroupsDiscovered: sync.GroupsDiscovered,
+		Error:            sync.Error,
+		StartedAt:        sync.StartedAt,
+		FinishedAt:       sync.FinishedAt,
+		CreatedAt:        sync.CreatedAt,
 	}
 	if sync.Source != nil {
-		attrs["source-name"] = sync.Source.Name
+		attrs.SourceName = sync.Source.Name
 	}
 	if includeOutput {
-		attrs["output"] = sync.Output
+		attrs.Output = &sync.Output
 	}
-	resp := gin.H{
-		"id":         sync.ID.String(),
-		"type":       "inventory-syncs",
-		"attributes": attrs,
-		"relationships": gin.H{
-			"inventory": gin.H{
-				"data": gin.H{"id": sync.InventoryID.String(), "type": "inventories"},
-			},
-		},
+	relationships := InventorySyncRelationships{
+		Inventory: jsonapi.ToOne(sync.InventoryID.String(), "inventories"),
 	}
 	if sync.SourceID != nil {
-		resp["relationships"].(gin.H)["source"] = gin.H{
-			"data": gin.H{"id": sync.SourceID.String(), "type": "inventory-sources"},
-		}
+		r := jsonapi.ToOne(sync.SourceID.String(), "inventory-sources")
+		relationships.Source = &r
 	}
-	return resp
+	return jsonapi.Resource[InventorySyncAttributes]{
+		ID:            sync.ID.String(),
+		Type:          "inventory-syncs",
+		Attributes:    attrs,
+		Relationships: relationships,
+	}
 }

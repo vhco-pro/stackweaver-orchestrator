@@ -1,0 +1,53 @@
+{
+  "method": "GET",
+  "path": "/api/v2/dashboard/stats",
+  "status": 200,
+  "body": {
+    "data": {
+      "attributes": {
+        "active_ansible_jobs": "\u003cnumber\u003e",
+        "active_terraform_runs": "\u003cnumber\u003e",
+        "ansible_playbooks": "\u003cnumber\u003e",
+        "awaiting_approval": "\u003cnumber\u003e",
+        "completed_ansible_jobs_this_month": "\u003cnumber\u003e",
+        "completed_terraform_runs_this_month": "\u003cnumber\u003e",
+        "errored_job_templates": "\u003cnumber\u003e",
+        "errored_workspaces": "\u003cnumber\u003e",
+        "failed_inventory_syncs": "\u003cnumber\u003e",
+        "organizations": [
+          {
+            "active_ansible_jobs": "\u003cnumber\u003e",
+            "active_terraform_runs": "\u003cnumber\u003e",
+            "ansible_playbooks": "\u003cnumber\u003e",
+            "awaiting_approval": "\u003cnumber\u003e",
+            "completed_ansible_jobs_this_month": "\u003cnumber\u003e",
+            "completed_terraform_runs_this_month": "\u003cnumber\u003e",
+            "description": "[demoseed] Generated demo data - safe to delete.",
+            "errored_job_templates": "\u003cnumber\u003e",
+            "errored_workspaces": "\u003cnumber\u003e",
+            "failed_inventory_syncs": "\u003cnumber\u003e",
+            "id": "\u003cuuid\u003e",
+            "name": "demo",
+            "open_change_requests": "\u003cnumber\u003e",
+            "pending_terraform_runs": "\u003cnumber\u003e",
+            "pending_workflow_approvals": "\u003cnumber\u003e",
+            "projects": "\u003cnumber\u003e",
+            "recent_job_failures": "\u003cnumber\u003e",
+            "recent_run_failures": "\u003cnumber\u003e",
+            "runners_offline": "\u003cnumber\u003e",
+            "runners_total": "\u003cnumber\u003e",
+            "terraform_workspaces": "\u003cnumber\u003e"
+          }
+        ],
+        "pending_terraform_runs": "\u003cnumber\u003e",
+        "pending_workflow_approvals": "\u003cnumber\u003e",
+        "projects": "\u003cnumber\u003e",
+        "recent_failure_window_days": "\u003cnumber\u003e",
+        "recent_job_failures": "\u003cnumber\u003e",
+        "recent_run_failures": "\u003cnumber\u003e",
+        "terraform_workspaces": "\u003cnumber\u003e"
+      },
+      "type": "dashboard-stats"
+    }
+  }
+}

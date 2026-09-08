@@ -14,6 +14,7 @@ import (
 	"github.com/michielvha/logger"
 	"github.com/michielvha/stackweaver/backend/internal/api/helpers"
 	"github.com/michielvha/stackweaver/backend/internal/api/pagination"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/activity"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -146,92 +147,137 @@ type UpdateOrganizationRequestV2 struct {
 	} `json:"data"`
 }
 
-// buildTFEOrganizationResponse creates a TFE-compatible JSON:API response for an organization.
-// defaultProjectID, when non-nil, is emitted as the default-project relationship (the provider's
-// computed default_project_id).
-func buildTFEOrganizationResponse(org *models.Organization, defaultProjectID *uuid.UUID) gin.H {
-	// Use defaults if values are empty
+// OrganizationPermissions is the static permission surface every organization reports.
+// Constants on purpose: Stackweaver's team-based RBAC answers authorisation per request, and
+// this block exists so TFE clients that read it see a self-managed-style "yes" rather than
+// gating features off. Sentinel/SSO/subscription members stay false - no subsystem.
+type OrganizationPermissions struct {
+	CanUpdate                bool `json:"can-update"`
+	CanDestroy               bool `json:"can-destroy"`
+	CanAccessViaTeams        bool `json:"can-access-via-teams"`
+	CanCreateModule          bool `json:"can-create-module"`
+	CanCreateTeam            bool `json:"can-create-team"`
+	CanCreateWorkspace       bool `json:"can-create-workspace"`
+	CanManageUsers           bool `json:"can-manage-users"`
+	CanManageSubscription    bool `json:"can-manage-subscription"`
+	CanManageSSO             bool `json:"can-manage-sso"`
+	CanUpdateOAuth           bool `json:"can-update-oauth"`
+	CanUpdateSentinel        bool `json:"can-update-sentinel"`
+	CanUpdateSSHKeys         bool `json:"can-update-ssh-keys"`
+	CanUpdateAPIToken        bool `json:"can-update-api-token"`
+	CanTraverse              bool `json:"can-traverse"`
+	CanStartTrial            bool `json:"can-start-trial"`
+	CanUpdateAgentPools      bool `json:"can-update-agent-pools"`
+	CanManageTags            bool `json:"can-manage-tags"`
+	CanManageVarsets         bool `json:"can-manage-varsets"`
+	CanReadVarsets           bool `json:"can-read-varsets"`
+	CanManagePublicModules   bool `json:"can-manage-public-modules"`
+	CanCreateProvider        bool `json:"can-create-provider"`
+	CanManagePublicProviders bool `json:"can-manage-public-providers"`
+	CanCreateProject         bool `json:"can-create-project"`
+	CanManageAssessments     bool `json:"can-manage-assessments"`
+	CanReadAssessments       bool `json:"can-read-assessments"`
+	CanViewExplorer          bool `json:"can-view-explorer"`
+	CanDeployNoCodeModules   bool `json:"can-deploy-no-code-modules"`
+	CanManagePolicies        bool `json:"can-manage-policies"`
+	CanManagePolicyOverrides bool `json:"can-manage-policy-overrides"`
+	CanManageRunTasks        bool `json:"can-manage-run-tasks"`
+	CanReadRunTasks          bool `json:"can-read-run-tasks"`
+	CanManageProjects        bool `json:"can-manage-projects"`
+}
+
+// OrganizationResponseAttributes is the TFE organizations attribute block (#760).
+//
+// Two defaulting rules used to live only in comments beside a map and now live beside the
+// fields that carry them. CollaboratorAuthPolicy: an unset value reports "password".
+// DefaultExecutionMode: an unset mode reports "remote", because
+// tfe_organization_default_settings reads it back after every write and "" would show as
+// drift on the provider's next plan. SessionTimeout and SessionRemember are always-null
+// (sessions are Zitadel's), typed as *int so the members stay present as JSON null.
+type OrganizationResponseAttributes struct {
+	Name                                              string `json:"name"`
+	ExternalID                                        string `json:"external-id"`
+	CreatedAt                                         string `json:"created-at"`
+	UpdatedAt                                         string `json:"updated-at"`
+	Email                                             string `json:"email"`
+	SessionTimeout                                    *int   `json:"session-timeout"`
+	SessionRemember                                   *int   `json:"session-remember"`
+	CollaboratorAuthPolicy                            string `json:"collaborator-auth-policy"`
+	CostEstimationEnabled                             bool   `json:"cost-estimation-enabled"`
+	DefaultTerraformVersion                           string `json:"default-terraform-version"`
+	DefaultExecutionMode                              string `json:"default-execution-mode"`
+	AnsibleJobRetentionDays                           int    `json:"ansible-job-retention-days"`
+	AnsibleAdhocModules                               string `json:"ansible-adhoc-modules"`
+	SpeculativePlanManagementEnabled                  bool   `json:"speculative-plan-management-enabled"`
+	AggregatedCommitStatusEnabled                     bool   `json:"aggregated-commit-status-enabled"`
+	AssessmentsEnforced                               bool   `json:"assessments-enforced"`
+	AllowForceDeleteWorkspaces                        bool   `json:"allow-force-delete-workspaces"`
+	UserTokensEnabled                                 bool   `json:"user-tokens-enabled"`
+	SendPassingStatusesForUntriggeredSpeculativePlans bool   `json:"send-passing-statuses-for-untriggered-speculative-plans"`
+	// Declined surface (see the tfe_organization spec): echoed as drift-free constants.
+	OwnersTeamSAMLRoleID string `json:"owners-team-saml-role-id"`
+	EnforceHYOK          bool   `json:"enforce-hyok"`
+	StacksEnabled        bool   `json:"stacks-enabled"`
+	MaxTTLEnabled        bool   `json:"max-ttl-enabled"`
+	TwoFactorConformant  bool   `json:"two-factor-conformant"`
+
+	Permissions OrganizationPermissions `json:"permissions"`
+}
+
+// OrganizationResponseRelationships carries the two optional to-one relationships; both omit when
+// unset, exactly as the map-based builder emitted them conditionally.
+type OrganizationResponseRelationships struct {
+	DefaultAgentPool *jsonapi.Relationship `json:"default-agent-pool,omitempty"`
+	DefaultProject   *jsonapi.Relationship `json:"default-project,omitempty"`
+}
+
+// buildTFEOrganizationResponse builds a TFE-compatible organizations resource. TFE uses the
+// name as the resource id; the uuid rides in external-id.
+func buildTFEOrganizationResponse(org *models.Organization, defaultProjectID *uuid.UUID) jsonapi.Resource[OrganizationResponseAttributes] {
 	collaboratorAuthPolicy := org.CollaboratorAuthPolicy
 	if collaboratorAuthPolicy == "" {
 		collaboratorAuthPolicy = "password"
 	}
-
-	// tfe_organization_default_settings reads this back after every write, so an unset mode must still
-	// report the effective default rather than "" or the provider sees drift on the next plan.
 	defaultExecutionMode := org.DefaultExecutionMode
 	if defaultExecutionMode == "" {
 		defaultExecutionMode = "remote"
 	}
 
-	return gin.H{
-		"id":   org.Name, // TFE uses name as ID for organizations
-		"type": "organizations",
-		"attributes": gin.H{
-			"name":                                org.Name,
-			"external-id":                         org.ID.String(),
-			"created-at":                          org.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			"updated-at":                          org.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-			"email":                               org.Email,
-			"session-timeout":                     nil,
-			"session-remember":                    nil,
-			"collaborator-auth-policy":            collaboratorAuthPolicy,
-			"cost-estimation-enabled":             org.CostEstimationEnabled,
-			"default-terraform-version":           org.DefaultTofuVersion,
-			"default-execution-mode":              defaultExecutionMode,
-			"ansible-job-retention-days":          org.AnsibleJobRetentionDays,
-			"ansible-adhoc-modules":               org.AnsibleAdHocModules,
-			"speculative-plan-management-enabled": org.SpeculativePlanManagement(),
-			"aggregated-commit-status-enabled":    org.AggregatedCommitStatusEnabled,
-			"assessments-enforced":                org.AssessmentsEnforced,
-			"allow-force-delete-workspaces":       org.AllowForceDeleteWorkspaces,
-			"user-tokens-enabled":                 org.UserTokensAllowed(),
-			"send-passing-statuses-for-untriggered-speculative-plans": org.SendPassingStatusesForUntriggeredSpeculativePlans,
-			// Declined surface (see the tfe_organization spec): echoed as drift-free constants.
-			// Sessions are Zitadel's; SAML/HYOK/Stacks/max-TTL have no subsystem.
-			"owners-team-saml-role-id": "",
-			"enforce-hyok":             false,
-			"stacks-enabled":           false,
-			"max-ttl-enabled":          false,
-			"two-factor-conformant":    false,
-			"permissions": gin.H{
-				"can-update":                  true,
-				"can-destroy":                 true,
-				"can-access-via-teams":        true,
-				"can-create-module":           true,
-				"can-create-team":             true,
-				"can-create-workspace":        true,
-				"can-manage-users":            true,
-				"can-manage-subscription":     false,
-				"can-manage-sso":              false,
-				"can-update-oauth":            true,
-				"can-update-sentinel":         false,
-				"can-update-ssh-keys":         true,
-				"can-update-api-token":        true,
-				"can-traverse":                true,
-				"can-start-trial":             false,
-				"can-update-agent-pools":      true,
-				"can-manage-tags":             true,
-				"can-manage-varsets":          true,
-				"can-read-varsets":            true,
-				"can-manage-public-modules":   true,
-				"can-create-provider":         true,
-				"can-manage-public-providers": false,
-				"can-create-project":          true,
-				"can-manage-assessments":      true,
-				"can-read-assessments":        true,
-				"can-view-explorer":           true,
-				"can-deploy-no-code-modules":  false,
-				"can-manage-policies":         true,
-				"can-manage-policy-overrides": true,
-				"can-manage-run-tasks":        true,
-				"can-read-run-tasks":          true,
-				"can-manage-projects":         true,
+	return jsonapi.Resource[OrganizationResponseAttributes]{
+		ID:   org.Name,
+		Type: "organizations",
+		Attributes: OrganizationResponseAttributes{
+			Name:                             org.Name,
+			ExternalID:                       org.ID.String(),
+			CreatedAt:                        org.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			UpdatedAt:                        org.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+			Email:                            org.Email,
+			CollaboratorAuthPolicy:           collaboratorAuthPolicy,
+			CostEstimationEnabled:            org.CostEstimationEnabled,
+			DefaultTerraformVersion:          org.DefaultTofuVersion,
+			DefaultExecutionMode:             defaultExecutionMode,
+			AnsibleJobRetentionDays:          org.AnsibleJobRetentionDays,
+			AnsibleAdhocModules:              org.AnsibleAdHocModules,
+			SpeculativePlanManagementEnabled: org.SpeculativePlanManagement(),
+			AggregatedCommitStatusEnabled:    org.AggregatedCommitStatusEnabled,
+			AssessmentsEnforced:              org.AssessmentsEnforced,
+			AllowForceDeleteWorkspaces:       org.AllowForceDeleteWorkspaces,
+			UserTokensEnabled:                org.UserTokensAllowed(),
+			SendPassingStatusesForUntriggeredSpeculativePlans: org.SendPassingStatusesForUntriggeredSpeculativePlans,
+			Permissions: OrganizationPermissions{
+				CanUpdate: true, CanDestroy: true, CanAccessViaTeams: true,
+				CanCreateModule: true, CanCreateTeam: true, CanCreateWorkspace: true,
+				CanManageUsers: true, CanUpdateOAuth: true, CanUpdateSSHKeys: true,
+				CanUpdateAPIToken: true, CanTraverse: true, CanUpdateAgentPools: true,
+				CanManageTags: true, CanManageVarsets: true, CanReadVarsets: true,
+				CanManagePublicModules: true, CanCreateProvider: true, CanCreateProject: true,
+				CanManageAssessments: true, CanReadAssessments: true, CanViewExplorer: true,
+				CanManagePolicies: true, CanManagePolicyOverrides: true,
+				CanManageRunTasks: true, CanReadRunTasks: true, CanManageProjects: true,
 			},
 		},
-		"relationships": orgRelationshipsResponse(org, defaultProjectID),
-		"links": gin.H{
-			"self": "/api/v2/organizations/" + org.Name,
-		},
+		Relationships: orgRelationshipsResponse(org, defaultProjectID),
+		Links:         jsonapi.SelfLink{Self: "/api/v2/organizations/" + org.Name},
 	}
 }
 
@@ -289,17 +335,15 @@ func (h *OrganizationHandlerV2) applyOrgDefaultSettings(org *models.Organization
 // explicit {"data": null} is equally valid JSON:API but noisier to no benefit. default-project is
 // likewise omitted when the org has no "default" project (pre-bootstrap edge) - the provider
 // nil-guards its read.
-func orgRelationshipsResponse(org *models.Organization, defaultProjectID *uuid.UUID) gin.H {
-	rels := gin.H{}
+func orgRelationshipsResponse(org *models.Organization, defaultProjectID *uuid.UUID) OrganizationResponseRelationships {
+	var rels OrganizationResponseRelationships
 	if org.DefaultAgentPoolID != nil {
-		rels["default-agent-pool"] = gin.H{
-			"data": gin.H{"id": org.DefaultAgentPoolID.String(), "type": "agent-pools"},
-		}
+		r := jsonapi.ToOne(org.DefaultAgentPoolID.String(), "agent-pools")
+		rels.DefaultAgentPool = &r
 	}
 	if defaultProjectID != nil {
-		rels["default-project"] = gin.H{
-			"data": gin.H{"id": defaultProjectID.String(), "type": "projects"},
-		}
+		r := jsonapi.ToOne(defaultProjectID.String(), "projects")
+		rels.DefaultProject = &r
 	}
 	return rels
 }
@@ -322,15 +366,7 @@ func (h *OrganizationHandlerV2) defaultProjectID(org *models.Organization) *uuid
 func (h *OrganizationHandlerV2) List(c *gin.Context) {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -344,16 +380,12 @@ func (h *OrganizationHandlerV2) List(c *gin.Context) {
 			boundVal, _ := c.Get("token_org_id")
 			boundOrg, ok := boundVal.(uuid.UUID)
 			if !ok {
-				c.JSON(http.StatusForbidden, gin.H{
-					"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "token is not bound to an organization"}},
-				})
+				jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "token is not bound to an organization")
 				return
 			}
 			org, err := h.orgRepo.GetByID(boundOrg)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to list organizations"}},
-				})
+				jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list organizations")
 				return
 			}
 			orgs = []models.Organization{*org}
@@ -364,15 +396,7 @@ func (h *OrganizationHandlerV2) List(c *gin.Context) {
 		orgs, err = h.orgRepo.WithContext(c.Request.Context()).ListByUser(user.ID)
 		if err != nil {
 			logger.Errorf("Failed to list organizations for user %s: %v", user.ID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to list organizations",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list organizations")
 			return
 		}
 	}
@@ -404,34 +428,14 @@ func (h *OrganizationHandlerV2) List(c *gin.Context) {
 	// not raw model structs). The default-project relationship is omitted here (nil): the provider's
 	// list path reads only names + external-ids, and resolving it per row would be an N+1 across the
 	// page. The single-org GET still emits it.
-	data := make([]gin.H, 0, len(paginatedOrgs))
+	data := make([]jsonapi.Resource[OrganizationResponseAttributes], 0, len(paginatedOrgs))
 	for i := range paginatedOrgs {
 		data = append(data, buildTFEOrganizationResponse(&paginatedOrgs[i], nil))
 	}
 
 	// Full TFE pagination meta: go-tfe's multi-page loops advance via next-page, so it must be
 	// present (a missing key decodes to 0 and would wedge a >1-page listing on page[number]=0).
-	totalPages := int((total + int64(perPage) - 1) / int64(perPage))
-	var prevPage, nextPage any
-	if page > 1 {
-		prevPage = page - 1
-	}
-	if page < totalPages {
-		nextPage = page + 1
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"prev-page":    prevPage,
-				"next-page":    nextPage,
-				"page-size":    perPage,
-				"total-pages":  totalPages,
-				"total-count":  total,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // Get returns a single organization by name
@@ -442,22 +446,12 @@ func (h *OrganizationHandlerV2) Get(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// TFE-compatible JSON:API response
-	c.JSON(http.StatusOK, gin.H{
-		"data": buildTFEOrganizationResponse(org, h.defaultProjectID(org)),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, buildTFEOrganizationResponse(org, h.defaultProjectID(org)))
 }
 
 // Create creates a new organization
@@ -465,29 +459,13 @@ func (h *OrganizationHandlerV2) Get(c *gin.Context) {
 func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	var req CreateOrganizationRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -523,30 +501,14 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 
 	// Validate name length
 	if len(name) == 0 || len(name) > 200 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Validation Error",
-					"detail": "Name must be between 1 and 200 characters",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Validation Error", "Name must be between 1 and 200 characters")
 		return
 	}
 
 	// Check for duplicate name
 	existing, _ := h.orgRepo.GetByName(name)
 	if existing != nil {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Organization with this name already exists",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Organization with this name already exists")
 		return
 	}
 
@@ -562,9 +524,7 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	// the rest, but the wire contract accepts them on create too).
 	if req.Data != nil {
 		if detail, ok := applyOrgPolicyAttributes(org, &req.Data.Attributes); !ok {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{
-				"errors": []gin.H{{"status": "422", "title": "Invalid Attribute", "detail": detail}},
-			})
+			jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Attribute", detail)
 			return
 		}
 	}
@@ -573,26 +533,10 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 		// AUD-109: a permanently-reserved name (previously used, now deleted) is a client error,
 		// not a server error - surface it as 422 so the caller knows to pick a different name.
 		if errors.Is(err, repository.ErrOrganizationNameReserved) {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "422",
-						"title":  "Unprocessable Entity",
-						"detail": "Organization name is reserved and cannot be reused",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Unprocessable Entity", "Organization name is reserved and cannot be reused")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to create organization",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create organization")
 		return
 	}
 
@@ -600,15 +544,7 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	if err := h.createDefaultTeams(org.ID); err != nil {
 		logger.Errorf("Failed to create default teams for org %s: %v", org.ID, err)
 		h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023: don't leave a half-built org
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": fmt.Sprintf("Failed to create default teams: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to create default teams: %v", err))
 		return
 	}
 
@@ -629,16 +565,12 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 		case strings.Contains(errStr, "foreign key") || strings.Contains(errStr, "violates foreign key constraint"):
 			logger.Errorf("Failed to add member %s to org %s: %v", user.ID, org.ID, err)
 			h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to add user to organization: user record not found. Please contact support."}},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to add user to organization: user record not found. Please contact support.")
 			return
 		default:
 			logger.Errorf("Failed to add member %s to org %s: %v", user.ID, org.ID, err)
 			h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to add member: %v", err)}},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to add member: %v", err))
 			return
 		}
 	}
@@ -648,29 +580,13 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	if err != nil {
 		logger.Errorf("Failed to find owners team for org %s: %v", org.ID, err)
 		h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": fmt.Sprintf("Failed to find owners team: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to find owners team: %v", err))
 		return
 	}
 	if err := h.teamRepo.AddMember(ownersTeam.ID, user.ID); err != nil {
 		logger.Errorf("Failed to add member %s to owners team %s: %v", user.ID, ownersTeam.ID, err)
 		h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": fmt.Sprintf("Failed to add creator to owners team: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to add creator to owners team: %v", err))
 		return
 	}
 
@@ -679,15 +595,7 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	if err := h.createDefaultProject(org.ID, ownersTeam.ID); err != nil {
 		logger.Errorf("Failed to create default project for org %s: %v", org.ID, err)
 		h.cleanupFailedOrgBootstrap(org.ID, org.Name) // AUD-023
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": fmt.Sprintf("Failed to create default project: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to create default project: %v", err))
 		return
 	}
 
@@ -718,9 +626,7 @@ func (h *OrganizationHandlerV2) Create(c *gin.Context) {
 	}
 
 	// Return TFE-compatible JSON:API response
-	c.JSON(http.StatusCreated, gin.H{
-		"data": buildTFEOrganizationResponse(org, h.defaultProjectID(org)),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, buildTFEOrganizationResponse(org, h.defaultProjectID(org)))
 }
 
 // Update updates an organization by name
@@ -730,15 +636,7 @@ func (h *OrganizationHandlerV2) Update(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
@@ -748,36 +646,22 @@ func (h *OrganizationHandlerV2) Update(c *gin.Context) {
 	// downgrade collaborator_auth_policy, or change the org run-execution defaults.
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	canManage, err := h.rbacService.CheckOrgManageMembership(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !canManage {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to update this organization"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to update this organization")
 		return
 	}
 
 	var req UpdateOrganizationRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -815,15 +699,7 @@ func (h *OrganizationHandlerV2) Update(c *gin.Context) {
 		if newName != org.Name {
 			existing, _ := h.orgRepo.GetByName(newName)
 			if existing != nil {
-				c.JSON(http.StatusConflict, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "409",
-							"title":  "Conflict",
-							"detail": "Organization with this name already exists",
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Organization with this name already exists")
 				return
 			}
 		}
@@ -857,30 +733,18 @@ func (h *OrganizationHandlerV2) Update(c *gin.Context) {
 	// tfe_organization_default_settings: the org-wide execution defaults.
 	if req.Data != nil {
 		if detail, ok := h.applyOrgDefaultSettings(org, req.Data.Attributes.DefaultExecutionMode, req.Data.Relationships); !ok {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{
-				"errors": []gin.H{{"status": "422", "title": "Invalid Attribute", "detail": detail}},
-			})
+			jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Attribute", detail)
 			return
 		}
 		// tfe_organization policy flags (pointer semantics: only supplied attributes change).
 		if detail, ok := applyOrgPolicyAttributes(org, &req.Data.Attributes); !ok {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{
-				"errors": []gin.H{{"status": "422", "title": "Invalid Attribute", "detail": detail}},
-			})
+			jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Attribute", detail)
 			return
 		}
 	}
 
 	if err := h.orgRepo.Update(org); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to update organization",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update organization")
 		return
 	}
 
@@ -902,9 +766,7 @@ func (h *OrganizationHandlerV2) Update(c *gin.Context) {
 	}
 
 	// Return TFE-compatible JSON:API response
-	c.JSON(http.StatusOK, gin.H{
-		"data": buildTFEOrganizationResponse(org, h.defaultProjectID(org)),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, buildTFEOrganizationResponse(org, h.defaultProjectID(org)))
 }
 
 // Delete deletes an organization by name
@@ -914,29 +776,13 @@ func (h *OrganizationHandlerV2) Delete(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -944,28 +790,12 @@ func (h *OrganizationHandlerV2) Delete(c *gin.Context) {
 	// Organization deletion requires user to be in "owners" team
 	hasManageMembership, err := h.rbacService.CheckOrgManageMembership(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 
 	if !hasManageMembership {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "You do not have permission to delete this organization. Organization deletion requires membership in the 'owners' team.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to delete this organization. Organization deletion requires membership in the 'owners' team.")
 		return
 	}
 
@@ -978,15 +808,7 @@ func (h *OrganizationHandlerV2) Delete(c *gin.Context) {
 	}
 
 	if err := h.orgRepo.Delete(org.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to delete organization",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete organization")
 		return
 	}
 
@@ -1002,44 +824,50 @@ func (h *OrganizationHandlerV2) GetEntitlementSet(c *gin.Context) {
 	// Verify organization exists
 	org, err := h.orgRepo.GetByName(name)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// TFE-compatible entitlement set response
 	// This endpoint returns what features/entitlements the organization has access to
 	// JSON:API format: id and type at top level, attributes contain the actual data
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"id":   org.ID.String(),
-			"type": "entitlement-sets",
-			"attributes": gin.H{
-				"cost-estimation":         true,
-				"configuration-design":    true,
-				"operations":              true,
-				"private-module-registry": true,
-				"state-storage":           true,
-				"teams":                   true,
-				"vcs-integrations":        true,
-				"usage-reporting":         true,
-				"user-limit":              0, // 0 means unlimited
-				"self-serve-billing":      false,
-				"audit-logging":           true,
-				"sso":                     false,
-				"sentinel":                false,
-				"agents":                  false,
-				"policy-enforcement":      false,
-			},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[EntitlementSetAttributes]{
+		ID:   org.ID.String(),
+		Type: "entitlement-sets",
+		Attributes: EntitlementSetAttributes{
+			CostEstimation:        true,
+			ConfigurationDesign:   true,
+			Operations:            true,
+			PrivateModuleRegistry: true,
+			StateStorage:          true,
+			Teams:                 true,
+			VCSIntegrations:       true,
+			UsageReporting:        true,
+			AuditLogging:          true,
 		},
 	})
+}
+
+// EntitlementSetAttributes is the TFE entitlement-sets block: which features the deployment
+// grants. Constants, because Stackweaver has no billing tiers - everything implemented is on,
+// everything without a subsystem (sso, sentinel, agents billing, policy enforcement) reports
+// false, and UserLimit 0 means unlimited.
+type EntitlementSetAttributes struct {
+	CostEstimation        bool `json:"cost-estimation"`
+	ConfigurationDesign   bool `json:"configuration-design"`
+	Operations            bool `json:"operations"`
+	PrivateModuleRegistry bool `json:"private-module-registry"`
+	StateStorage          bool `json:"state-storage"`
+	Teams                 bool `json:"teams"`
+	VCSIntegrations       bool `json:"vcs-integrations"`
+	UsageReporting        bool `json:"usage-reporting"`
+	UserLimit             int  `json:"user-limit"`
+	SelfServeBilling      bool `json:"self-serve-billing"`
+	AuditLogging          bool `json:"audit-logging"`
+	SSO                   bool `json:"sso"`
+	Sentinel              bool `json:"sentinel"`
+	Agents                bool `json:"agents"`
+	PolicyEnforcement     bool `json:"policy-enforcement"`
 }
 
 // createDefaultProject creates the default project and grants the owners team full access
@@ -1285,19 +1113,19 @@ func (h *OrganizationHandlerV2) GetEffectivePermissions(c *gin.Context) {
 	orgName := c.Param("name")
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Organization not found"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Organization not found")
 		return
 	}
 
 	perms, err := h.rbacService.GetEffectivePermissions(c.Request.Context(), userID.(uuid.UUID), org.ID)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Access denied"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusForbidden, "Access denied")
 		return
 	}
 
@@ -1307,11 +1135,9 @@ func (h *OrganizationHandlerV2) GetEffectivePermissions(c *gin.Context) {
 		result[string(perm)] = granted
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"type":       "effective-permissions",
-			"id":         org.ID.String(),
-			"attributes": result,
-		},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[map[string]bool]{
+		ID:         org.ID.String(),
+		Type:       "effective-permissions",
+		Attributes: result,
 	})
 }

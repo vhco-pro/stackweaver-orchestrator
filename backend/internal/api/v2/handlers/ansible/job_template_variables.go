@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -57,16 +58,12 @@ func (h *JobTemplateVariableHandlerV2) SetRepositories(orgRepo *repository.Organ
 func (h *JobTemplateVariableHandlerV2) authorizeTemplate(c *gin.Context, templateID uuid.UUID, write bool) (*models.AnsibleJobTemplate, bool) {
 	template, err := h.templateRepo.GetByID(templateID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Job template not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job template not found")
 		return nil, false
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return nil, false
 	}
 	perm := rbac.PermissionAnsibleJobTemplateRead
@@ -77,22 +74,18 @@ func (h *JobTemplateVariableHandlerV2) authorizeTemplate(c *gin.Context, templat
 		c.Request.Context(), user.ID, rbac.ResourceTypeAnsibleJobTemplate, template.ID.String(), perm, &template.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return nil, false
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to manage this job template's variables"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to manage this job template's variables")
 		return nil, false
 	}
 	return template, true
 }
 
 // formatVariableResponse formats a template variable in TFE-compatible JSON:API format
-func (h *JobTemplateVariableHandlerV2) formatVariableResponse(variable *models.AnsibleJobTemplateVariable, templateID uuid.UUID) gin.H {
+func (h *JobTemplateVariableHandlerV2) formatVariableResponse(variable *models.AnsibleJobTemplateVariable, templateID uuid.UUID) jsonapi.Resource[TemplateVariableAttributes] {
 	// TFE-compatible response format
 	// Sensitive variable values must be masked in API responses
 	value := variable.Value
@@ -100,27 +93,22 @@ func (h *JobTemplateVariableHandlerV2) formatVariableResponse(variable *models.A
 		value = "••••••••"
 	}
 
-	return gin.H{
-		"id":   variable.ID,
-		"type": "vars", // TFE uses "vars" not "variables"
-		"attributes": gin.H{
-			"key":         variable.Key,
-			"value":       value, // Masked if sensitive
-			"description": variable.Description,
-			"sensitive":   variable.Sensitive,
-			"category":    variable.Category,
-			"hcl":         variable.HCL,
+	return jsonapi.Resource[TemplateVariableAttributes]{
+		ID:   variable.ID,
+		Type: "vars", // TFE uses "vars" not "variables"
+		Attributes: TemplateVariableAttributes{
+			Key:         variable.Key,
+			Value:       value, // Masked if sensitive
+			Description: variable.Description,
+			Sensitive:   variable.Sensitive,
+			Category:    variable.Category,
+			HCL:         variable.HCL,
 		},
-		"relationships": gin.H{
-			"configurable": gin.H{ // TFE uses "configurable"
-				"data": gin.H{
-					"id":   templateID.String(),
-					"type": "job-templates",
-				},
-			},
+		Relationships: ConfigurableRelationship{ // TFE uses "configurable"
+			Configurable: jsonapi.ToOne(templateID.String(), "job-templates"),
 		},
-		"links": gin.H{
-			"self": fmt.Sprintf("/api/v2/ansible/job-templates/%s/vars/%s", templateID.String(), variable.ID),
+		Links: jsonapi.SelfLink{
+			Self: fmt.Sprintf("/api/v2/ansible/job-templates/%s/vars/%s", templateID.String(), variable.ID),
 		},
 	}
 }
@@ -162,7 +150,7 @@ func (h *JobTemplateVariableHandlerV2) ListByJobTemplate(c *gin.Context) {
 	templateIDStr := c.Param("id")
 	templateID, err := uuid.Parse(templateIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job template ID"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid job template ID")
 		return
 	}
 
@@ -174,22 +162,19 @@ func (h *JobTemplateVariableHandlerV2) ListByJobTemplate(c *gin.Context) {
 	// List variables
 	variables, err := h.templateVariableRepo.ListByJobTemplate(templateID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list variables"})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to list variables")
 		return
 	}
 
 	// Format response (TFE-compatible JSON:API format)
-	data := make([]gin.H, 0, len(variables))
+	data := make([]jsonapi.Resource[TemplateVariableAttributes], 0, len(variables))
 	for _, v := range variables {
 		data = append(data, h.formatVariableResponse(&v, templateID))
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"links": gin.H{
-			"self": fmt.Sprintf("/api/v2/ansible/job-templates/%s/vars", templateIDStr),
-		},
-	})
+	c.JSON(http.StatusOK, jsonapi.Document{Data: data, Meta: jsonapi.NewFullPageMeta(len(data)), Links: jsonapi.SelfLink{
+		Self: fmt.Sprintf("/api/v2/ansible/job-templates/%s/vars", templateIDStr),
+	}})
 }
 
 // Create creates a variable for a job template
@@ -198,7 +183,7 @@ func (h *JobTemplateVariableHandlerV2) Create(c *gin.Context) {
 	templateIDStr := c.Param("id")
 	templateID, err := uuid.Parse(templateIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job template ID"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid job template ID")
 		return
 	}
 
@@ -210,12 +195,12 @@ func (h *JobTemplateVariableHandlerV2) Create(c *gin.Context) {
 	// Parse request
 	var req CreateVariableRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, err.Error())
 		return
 	}
 
 	if req.Data.Type != "vars" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid type: must be 'vars'"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid type: must be 'vars'")
 		return
 	}
 
@@ -231,7 +216,7 @@ func (h *JobTemplateVariableHandlerV2) Create(c *gin.Context) {
 	if req.Data.Attributes.Sensitive {
 		encryptedValue, err := h.variableService.Encrypt(req.Data.Attributes.Value)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt variable"})
+			jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to encrypt variable")
 			return
 		}
 		finalValue = encryptedValue
@@ -256,16 +241,14 @@ func (h *JobTemplateVariableHandlerV2) Create(c *gin.Context) {
 	if err := h.templateVariableRepo.Create(variable); err != nil {
 		// Check for duplicate key error
 		if err.Error() == "pq: duplicate key value violates unique constraint \"idx_job_template_key\"" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Variable with this key already exists"})
+			jsonapi.WriteError(c, http.StatusConflict, jsonapi.TitleConflict, "Variable with this key already exists")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create variable"})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to create variable")
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": h.formatVariableResponse(variable, templateID),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, h.formatVariableResponse(variable, templateID))
 }
 
 // Update updates a variable for a job template
@@ -274,13 +257,13 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 	templateIDStr := c.Param("id")
 	templateID, err := uuid.Parse(templateIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job template ID"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid job template ID")
 		return
 	}
 
 	variableID := c.Param("variable_id")
 	if variableID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Variable ID is required"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Variable ID is required")
 		return
 	}
 
@@ -292,25 +275,25 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 	// Get existing variable
 	variable, err := h.templateVariableRepo.GetByID(variableID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Variable not found"})
+		jsonapi.WriteError(c, http.StatusNotFound, jsonapi.TitleNotFound, "Variable not found")
 		return
 	}
 
 	// Verify variable belongs to this template
 	if variable.JobTemplateID != templateID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Variable does not belong to this job template"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Variable does not belong to this job template")
 		return
 	}
 
 	// Parse request
 	var req UpdateVariableRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, err.Error())
 		return
 	}
 
 	if req.Data.Type != "vars" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid type: must be 'vars'"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid type: must be 'vars'")
 		return
 	}
 
@@ -323,7 +306,7 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 		if variable.Sensitive {
 			encryptedValue, err := h.variableService.Encrypt(req.Data.Attributes.Value)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt variable"})
+				jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to encrypt variable")
 				return
 			}
 			variable.Value = encryptedValue
@@ -345,7 +328,7 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 		if *req.Data.Attributes.Sensitive && !variable.Sensitive {
 			encryptedValue, err := h.variableService.Encrypt(variable.Value)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt variable"})
+				jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to encrypt variable")
 				return
 			}
 			variable.Value = encryptedValue
@@ -354,7 +337,7 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 			// If changing from sensitive to non-sensitive, decrypt the value
 			decryptedValue, err := h.variableService.GetDecryptedTemplateVariableValue(variable)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decrypt variable"})
+				jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to decrypt variable")
 				return
 			}
 			variable.Value = decryptedValue
@@ -365,13 +348,11 @@ func (h *JobTemplateVariableHandlerV2) Update(c *gin.Context) {
 
 	// Save updated variable
 	if err := h.templateVariableRepo.Update(variable); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update variable"})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to update variable")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": h.formatVariableResponse(variable, templateID),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, h.formatVariableResponse(variable, templateID))
 }
 
 // Delete deletes a variable for a job template
@@ -380,13 +361,13 @@ func (h *JobTemplateVariableHandlerV2) Delete(c *gin.Context) {
 	templateIDStr := c.Param("id")
 	templateID, err := uuid.Parse(templateIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job template ID"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Invalid job template ID")
 		return
 	}
 
 	variableID := c.Param("variable_id")
 	if variableID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Variable ID is required"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Variable ID is required")
 		return
 	}
 
@@ -398,17 +379,17 @@ func (h *JobTemplateVariableHandlerV2) Delete(c *gin.Context) {
 	// Verify variable belongs to this template
 	variable, err := h.templateVariableRepo.GetByID(variableID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Variable not found"})
+		jsonapi.WriteError(c, http.StatusNotFound, jsonapi.TitleNotFound, "Variable not found")
 		return
 	}
 	if variable.JobTemplateID != templateID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Variable does not belong to this job template"})
+		jsonapi.WriteError(c, http.StatusBadRequest, jsonapi.TitleBadRequest, "Variable does not belong to this job template")
 		return
 	}
 
 	// Delete variable
 	if err := h.templateVariableRepo.Delete(variableID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete variable"})
+		jsonapi.WriteError(c, http.StatusInternalServerError, jsonapi.TitleInternal, "Failed to delete variable")
 		return
 	}
 

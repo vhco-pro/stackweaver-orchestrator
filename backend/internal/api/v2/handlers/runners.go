@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -44,13 +45,13 @@ func NewRunnerHandlerV2(
 func (h *RunnerHandlerV2) requireManageAgentPools(c *gin.Context, orgID uuid.UUID) bool {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusUnauthorized, "Unauthorized")
 		return false
 	}
 	uid := userID.(uuid.UUID)
 	ok, err := h.rbacService.CheckOrgManageAgentPools(c.Request.Context(), uid, orgID)
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to manage agent pools/runners for this organization"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to manage agent pools/runners for this organization")
 		return false
 	}
 	return true
@@ -63,9 +64,9 @@ func (h *RunnerHandlerV2) List(c *gin.Context) {
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Organization not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Organization not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
@@ -111,29 +112,17 @@ func (h *RunnerHandlerV2) List(c *gin.Context) {
 
 	runners, total, err := h.runnerRepo.ListByOrganization(org.ID, opts)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
 	// Build response
-	data := make([]gin.H, 0, len(runners))
+	data := make([]jsonapi.Resource[RunnerAttributes], 0, len(runners))
 	for _, r := range runners {
 		data = append(data, buildRunnerResponse(&r))
 	}
 
-	totalPages := (int(total) + pageSize - 1) / pageSize
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": pageNum,
-				"page-size":    pageSize,
-				"total-count":  total,
-				"total-pages":  totalPages,
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(pageNum, pageSize, total))
 }
 
 // GetByID returns a runner by ID
@@ -142,16 +131,16 @@ func (h *RunnerHandlerV2) GetByID(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Invalid runner ID"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusBadRequest, "Invalid runner ID")
 		return
 	}
 
 	runner, err := h.runnerRepo.GetByID(id)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Runner not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Runner not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
@@ -168,23 +157,23 @@ func (h *RunnerHandlerV2) GetByID(c *gin.Context) {
 	response := buildRunnerResponse(runner)
 
 	// Add job history to response
-	jobHistory := make([]gin.H, 0, len(jobs))
+	jobHistory := make([]RunnerRecentJob, 0, len(jobs))
 	for _, j := range jobs {
-		jobHistory = append(jobHistory, gin.H{
-			"id":             j.ID.String(),
-			"job_type":       j.JobType,
-			"job_id":         j.JobID.String(),
-			"workspace_id":   j.WorkspaceID,
-			"workspace_name": j.WorkspaceName,
-			"status":         j.Status,
-			"started_at":     j.StartedAt,
-			"finished_at":    j.FinishedAt,
-			"duration_ms":    j.Duration().Milliseconds(),
+		jobHistory = append(jobHistory, RunnerRecentJob{
+			ID:            j.ID.String(),
+			JobType:       j.JobType,
+			JobID:         j.JobID.String(),
+			WorkspaceID:   j.WorkspaceID,
+			WorkspaceName: j.WorkspaceName,
+			Status:        j.Status,
+			StartedAt:     j.StartedAt,
+			FinishedAt:    j.FinishedAt,
+			DurationMS:    j.Duration().Milliseconds(),
 		})
 	}
-	response["attributes"].(gin.H)["recent_jobs"] = jobHistory
+	response.Attributes.RecentJobs = &jobHistory
 
-	c.JSON(http.StatusOK, gin.H{"data": response})
+	jsonapi.WriteDocument(c, http.StatusOK, response)
 }
 
 // Update updates a runner (labels, description)
@@ -193,16 +182,16 @@ func (h *RunnerHandlerV2) Update(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Invalid runner ID"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusBadRequest, "Invalid runner ID")
 		return
 	}
 
 	runner, err := h.runnerRepo.GetByID(id)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Runner not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Runner not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
@@ -221,7 +210,7 @@ func (h *RunnerHandlerV2) Update(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -233,11 +222,11 @@ func (h *RunnerHandlerV2) Update(c *gin.Context) {
 	}
 
 	if err := h.runnerRepo.Update(runner); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": buildRunnerResponse(runner)})
+	jsonapi.WriteDocument(c, http.StatusOK, buildRunnerResponse(runner))
 }
 
 // Delete deletes a runner
@@ -246,16 +235,16 @@ func (h *RunnerHandlerV2) Delete(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Invalid runner ID"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusBadRequest, "Invalid runner ID")
 		return
 	}
 
 	runner, err := h.runnerRepo.GetByID(id)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Runner not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Runner not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
@@ -265,7 +254,7 @@ func (h *RunnerHandlerV2) Delete(c *gin.Context) {
 	}
 
 	if err := h.runnerRepo.Delete(id); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
@@ -279,9 +268,9 @@ func (h *RunnerHandlerV2) GetStats(c *gin.Context) {
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Organization not found"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusNotFound, "Organization not found")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+			jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		}
 		return
 	}
@@ -292,67 +281,61 @@ func (h *RunnerHandlerV2) GetStats(c *gin.Context) {
 
 	total, online, err := h.runnerRepo.CountByOrganization(org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error"}}})
+		jsonapi.WriteErrorNoDetail(c, http.StatusInternalServerError, "Internal Server Error")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"type": "runner-stats",
-			"attributes": gin.H{
-				"total":   total,
-				"online":  online,
-				"offline": total - online,
-			},
+	jsonapi.WriteDocument(c, http.StatusOK, RunnerStatsDocument{
+		Type: "runner-stats",
+		Attributes: RunnerStatsAttributes{
+			Total:   total,
+			Online:  online,
+			Offline: total - online,
 		},
 	})
 }
 
 // buildRunnerResponse builds a JSON:API response for a runner
-func buildRunnerResponse(r *models.Runner) gin.H {
+func buildRunnerResponse(r *models.Runner) jsonapi.Resource[RunnerAttributes] {
 	var lastHeartbeat *string
 	if r.LastHeartbeatAt != nil {
 		formatted := r.LastHeartbeatAt.Format("2006-01-02T15:04:05Z")
 		lastHeartbeat = &formatted
 	}
 
-	attrs := gin.H{
-		"name":                  r.Name,
-		"description":           r.Description,
-		"agent-pool-id":         r.AgentPoolID.String(),
-		"runner-type":           r.RunnerType,
-		"status":                r.Status,
-		"hostname":              r.Hostname,
-		"ip-address":            r.IPAddress,
-		"os-type":               r.OSType,
-		"os-version":            r.OSVersion,
-		"agent-version":         r.AgentVersion,
-		"labels":                r.Labels,
-		"tofu-version":          r.TofuVersion,
-		"ansible-version":       r.AnsibleVersion,
-		"available-collections": r.AvailableCollections,
-		"max-concurrent-jobs":   r.MaxConcurrentJobs,
-		"current-jobs":          r.CurrentJobs,
-		"last-heartbeat-at":     lastHeartbeat,
-		"registered-at":         r.RegisteredAt.Format("2006-01-02T15:04:05Z"),
+	attrs := RunnerAttributes{
+		Name:                 r.Name,
+		Description:          r.Description,
+		AgentPoolID:          r.AgentPoolID.String(),
+		RunnerType:           r.RunnerType,
+		Status:               r.Status,
+		Hostname:             r.Hostname,
+		IPAddress:            r.IPAddress,
+		OSType:               r.OSType,
+		OSVersion:            r.OSVersion,
+		AgentVersion:         r.AgentVersion,
+		Labels:               r.Labels,
+		TofuVersion:          r.TofuVersion,
+		AnsibleVersion:       r.AnsibleVersion,
+		AvailableCollections: r.AvailableCollections,
+		MaxConcurrentJobs:    r.MaxConcurrentJobs,
+		CurrentJobs:          r.CurrentJobs,
+		LastHeartbeatAt:      lastHeartbeat,
+		RegisteredAt:         r.RegisteredAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	// Include pool name if preloaded
 	if r.AgentPool.ID != uuid.Nil {
-		attrs["agent-pool-name"] = r.AgentPool.Name
+		attrs.AgentPoolName = r.AgentPool.Name
 	}
 
-	return gin.H{
-		"id":         r.ID.String(),
-		"type":       "runners",
-		"attributes": attrs,
-		"relationships": gin.H{
-			"organization": gin.H{
-				"data": gin.H{"id": r.OrganizationID.String(), "type": "organizations"},
-			},
-			"agent-pool": gin.H{
-				"data": gin.H{"id": r.AgentPoolID.String(), "type": "agent-pools"},
-			},
+	return jsonapi.Resource[RunnerAttributes]{
+		ID:         r.ID.String(),
+		Type:       "runners",
+		Attributes: attrs,
+		Relationships: OrgAndAgentPoolRelationships{
+			Organization: jsonapi.ToOne(r.OrganizationID.String(), "organizations"),
+			AgentPool:    jsonapi.ToOne(r.AgentPoolID.String(), "agent-pools"),
 		},
 	}
 }

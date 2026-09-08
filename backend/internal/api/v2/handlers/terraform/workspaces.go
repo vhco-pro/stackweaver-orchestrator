@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
 	"github.com/michielvha/stackweaver/backend/internal/api/helpers"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/activity"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -237,27 +238,23 @@ func wsEffectiveTagBindingsRequested(c *gin.Context) bool {
 	return strings.Contains(inc, "effective_tag_bindings") || strings.Contains(inc, "effective-tag-bindings")
 }
 
-func wsTagBindingLinkage(bindings []models.TagBinding, resourceType string) gin.H {
-	data := make([]gin.H, 0, len(bindings))
+func wsTagBindingLinkage(bindings []models.TagBinding, resourceType string) *jsonapi.ManyRelationship {
+	data := make([]jsonapi.ResourceID, 0, len(bindings))
 	for i := range bindings {
-		id := bindings[i].ID
-		if id == "" {
-			id = bindings[i].Key
-		}
-		data = append(data, gin.H{"type": resourceType, "id": id})
+		data = append(data, jsonapi.ResourceID{Type: resourceType, ID: tagBindingID(&bindings[i])})
 	}
-	return gin.H{"data": data}
+	return &jsonapi.ManyRelationship{Data: data}
 }
 
-func wsTagBindingIncluded(bindings []models.TagBinding, resourceType string) []gin.H {
-	out := make([]gin.H, 0, len(bindings))
+func wsTagBindingIncluded(bindings []models.TagBinding, resourceType string) []jsonapi.Resource[TagBindingAttributes] {
+	out := make([]jsonapi.Resource[TagBindingAttributes], 0, len(bindings))
 	for i := range bindings {
 		b := bindings[i]
-		id := b.ID
-		if id == "" {
-			id = b.Key
-		}
-		out = append(out, gin.H{"type": resourceType, "id": id, "attributes": gin.H{"key": b.Key, "value": b.Value}})
+		out = append(out, jsonapi.Resource[TagBindingAttributes]{
+			Type:       resourceType,
+			ID:         tagBindingID(&b),
+			Attributes: TagBindingAttributes{Key: b.Key, Value: b.Value},
+		})
 	}
 	return out
 }
@@ -265,16 +262,14 @@ func wsTagBindingIncluded(bindings []models.TagBinding, resourceType string) []g
 // workspaceResponseWithTags builds the workspace read response, adding the effective-tag-bindings
 // relationship + included resources when ?include=effective-tag-bindings was requested (how the tfe
 // provider resource + data.tfe_workspace read a workspace's effective tags).
-func (h *WorkspaceHandlerV2) workspaceResponseWithTags(c *gin.Context, workspace *models.Workspace) gin.H {
+func (h *WorkspaceHandlerV2) workspaceResponseWithTags(c *gin.Context, workspace *models.Workspace) jsonapi.Document {
 	data := formatWorkspaceResponse(workspace, h.vcsConnectionRepo)
-	resp := gin.H{"data": data}
+	resp := jsonapi.Document{Data: data}
 	if wsEffectiveTagBindingsRequested(c) {
 		eff, _ := repository.NewTagBindingRepository(h.db).EffectiveForWorkspace(workspace.ID)
-		if rels, ok := data["relationships"].(gin.H); ok {
-			rels["effective-tag-bindings"] = wsTagBindingLinkage(eff, "effective-tag-bindings")
-			rels["tag-bindings"] = wsTagBindingLinkage(eff, "tag-bindings")
-		}
-		resp["included"] = wsTagBindingIncluded(eff, "effective-tag-bindings")
+		data.Relationships.EffectiveTagBindings = wsTagBindingLinkage(eff, "effective-tag-bindings")
+		data.Relationships.TagBindings = wsTagBindingLinkage(eff, "tag-bindings")
+		resp.Included = wsTagBindingIncluded(eff, "effective-tag-bindings")
 	}
 	return resp
 }
@@ -382,13 +377,7 @@ func applyTriggerLists(workspace *models.Workspace, prefixes, patterns *[]string
 
 // triggerListConflictResponse writes the 422 both-lists-set error.
 func triggerListConflictResponse(c *gin.Context) {
-	c.JSON(http.StatusUnprocessableEntity, gin.H{
-		"errors": []gin.H{{
-			"status": "422",
-			"title":  "Invalid Attribute",
-			"detail": "trigger-patterns and trigger-prefixes are mutually exclusive; set only one",
-		}},
-	})
+	jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Attribute", "trigger-patterns and trigger-prefixes are mutually exclusive; set only one")
 }
 
 // --- Workspace list tag filtering (data.tfe_workspace_ids compatibility) ---------------------------
@@ -528,15 +517,19 @@ func wsEffectiveTagsBatch(db *gorm.DB, workspaces []models.Workspace) (map[strin
 // wsEffTagRelation builds the effective-tag-bindings relationship linkage + included resources for one
 // workspace in a list response. IDs are workspace-scoped (`<wsID>.<key>`) so JSON:API `included` stays
 // unique across workspaces that share a tag key with different values.
-func wsEffTagRelation(wsID string, eff []models.TagBinding) (gin.H, []gin.H) {
-	data := make([]gin.H, 0, len(eff))
-	included := make([]gin.H, 0, len(eff))
+func wsEffTagRelation(wsID string, eff []models.TagBinding) (*jsonapi.ManyRelationship, []jsonapi.Resource[TagBindingAttributes]) {
+	data := make([]jsonapi.ResourceID, 0, len(eff))
+	included := make([]jsonapi.Resource[TagBindingAttributes], 0, len(eff))
 	for _, b := range eff {
 		id := wsID + "." + b.Key
-		data = append(data, gin.H{"type": "effective-tag-bindings", "id": id})
-		included = append(included, gin.H{"type": "effective-tag-bindings", "id": id, "attributes": gin.H{"key": b.Key, "value": b.Value}})
+		data = append(data, jsonapi.ResourceID{Type: "effective-tag-bindings", ID: id})
+		included = append(included, jsonapi.Resource[TagBindingAttributes]{
+			Type:       "effective-tag-bindings",
+			ID:         id,
+			Attributes: TagBindingAttributes{Key: b.Key, Value: b.Value},
+		})
 	}
-	return gin.H{"data": data}, included
+	return &jsonapi.ManyRelationship{Data: data}, included
 }
 
 // ListByOrganization lists workspaces by organization name (TFE-compatible)
@@ -546,45 +539,21 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// Get user for permission checking
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	// Check if user has organization-level read-workspaces permission
 	hasOrgReadWorkspaces, err := h.rbacService.CheckOrgReadWorkspaces(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 
@@ -613,15 +582,7 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 		// User has organization-level read-workspaces permission - show all workspaces
 		workspaces, total, err = h.workspaceRepo.WithContext(c.Request.Context()).ListByOrganization(orgName, repoLimit, repoOffset)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to list workspaces",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list workspaces")
 			return
 		}
 	} else {
@@ -630,15 +591,7 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 		// Get all teams user is member of
 		teams, err := h.teamRepo.GetTeamsByUserID(user.ID, org.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to get user teams",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get user teams")
 			return
 		}
 
@@ -671,15 +624,7 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 			// Query workspaces that are in the accessible list
 			workspaces, total, err = h.workspaceRepo.WithContext(c.Request.Context()).ListByOrganizationAndIDs(orgName, workspaceIDList, repoLimit, repoOffset)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "500",
-							"title":  "Internal Server Error",
-							"detail": "Failed to list workspaces",
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list workspaces")
 				return
 			}
 		}
@@ -693,9 +638,7 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 		// Compute effective tags across the full loaded set, keep only matches, then paginate in memory.
 		effAll, err := wsEffectiveTagsBatch(h.db, workspaces)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to compute effective tags"}},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to compute effective tags")
 			return
 		}
 		filtered := make([]models.Workspace, 0, len(workspaces))
@@ -720,15 +663,13 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 		// No filtering, but the caller wants effective tags embedded for this page.
 		effByWs, err = wsEffectiveTagsBatch(h.db, workspaces)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to compute effective tags"}},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to compute effective tags")
 			return
 		}
 	}
 
 	// Format workspaces in TFE-compatible JSON:API format
-	workspacesData := make([]gin.H, len(workspaces))
+	workspacesData := make([]*WorkspaceResource, len(workspaces))
 
 	// Fetch latest run per workspace in a single batch query (avoids N+1)
 	workspaceIDs := make([]string, len(workspaces))
@@ -742,332 +683,237 @@ func (h *WorkspaceHandlerV2) ListByOrganization(c *gin.Context) {
 		latestRuns = map[string]*models.Run{}
 	}
 
-	var included []gin.H
+	var included []any
 	for i := range workspaces {
 		wsData := formatWorkspaceResponse(&workspaces[i], h.vcsConnectionRepo)
 
 		// Add current-run relationship if a run exists
 		if run, ok := latestRuns[workspaces[i].ID]; ok {
-			rels := wsData["relationships"].(gin.H)
-			rels["current-run"] = gin.H{
-				"data": gin.H{
-					"id":   run.ID,
-					"type": "runs",
-				},
-			}
+			r := jsonapi.ToOne(run.ID, "runs")
+			wsData.Relationships.CurrentRun = &r
 			included = append(included, formatRunForInclusion(run))
 		}
 
 		// Embed effective tag bindings when ?include=effective_tag_bindings was requested (the tfe
 		// provider's data.tfe_workspace_ids tag_filters path relies on this to read each workspace's tags).
 		if includeEff {
-			rels := wsData["relationships"].(gin.H)
 			linkage, inc := wsEffTagRelation(workspaces[i].ID, effByWs[workspaces[i].ID])
-			rels["effective-tag-bindings"] = linkage
-			included = append(included, inc...)
+			wsData.Relationships.EffectiveTagBindings = linkage
+			for _, r := range inc {
+				included = append(included, r)
+			}
 		}
 
 		workspacesData[i] = wsData
 	}
 
 	// TFE-compatible response format with sideloaded run data
-	response := gin.H{
-		"data": workspacesData,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"page":     pageNumber,
-				"per_page": pageSize,
-				"total":    total,
-			},
-		},
+	response := jsonapi.Document{
+		Data: workspacesData,
+		Meta: jsonapi.NewPaginationMeta(pageNumber, pageSize, total),
 	}
 	if len(included) > 0 {
-		response["included"] = included
+		response.Included = included
 	}
 	c.JSON(http.StatusOK, response)
 }
 
 // formatWorkspaceResponse formats a workspace model into TFE-compatible JSON:API format
 // Based on: https://developer.hashicorp.com/terraform/enterprise/api-docs/workspaces
-func formatWorkspaceResponse(workspace *models.Workspace, vcsConnRepo ...*repository.VCSConnectionRepository) gin.H {
-	attributes := gin.H{
-		"name":                workspace.Name,
-		"terraform-version":   workspace.TofuVersion,
-		"working-directory":   workspace.WorkingDirectory,
-		"auto-apply":          workspace.AutoApply,
-		"auto-queue-runs":     workspace.AutoQueueRuns,
-		"queue-all-runs":      workspace.QueueAllRuns,
-		"speculative-enabled": workspace.SpeculativeEnabled,
-		"allow-destroy-plan":  workspace.AllowDestroyPlan,
-		"execution-mode":      workspace.ExecutionMode,
-		"agent-pool-id":       workspace.AgentPoolID,
-		"locked":              workspace.Locked,
-		"created-at":          workspace.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":          workspace.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+func formatWorkspaceResponse(workspace *models.Workspace, vcsConnRepo ...*repository.VCSConnectionRepository) *WorkspaceResource {
+	attrs := WorkspaceAttributes{
+		Name:               workspace.Name,
+		TerraformVersion:   workspace.TofuVersion,
+		WorkingDirectory:   workspace.WorkingDirectory,
+		AutoApply:          workspace.AutoApply,
+		AutoQueueRuns:      workspace.AutoQueueRuns,
+		QueueAllRuns:       workspace.QueueAllRuns,
+		SpeculativeEnabled: workspace.SpeculativeEnabled,
+		AllowDestroyPlan:   workspace.AllowDestroyPlan,
+		ExecutionMode:      workspace.ExecutionMode,
+		Locked:             workspace.Locked,
+		CreatedAt:          workspace.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:          workspace.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Description:        workspace.Description, // go-tfe Description is plain string, always present
+
+		Actions:                    WorkspaceActions{IsDestroyable: true},
+		AutoApplyRunTrigger:        workspace.AutoApplyRunTrigger,
+		AssessmentsEnabled:         workspace.AssessmentsEnabled,
+		ForceDelete:                workspace.ForceDelete,
+		Environment:                "default", // TFE default
+		FileTriggersEnabled:        workspace.FileTriggersEnabled,
+		GlobalRemoteState:          workspace.GlobalRemoteState,
+		ResourceCount:              workspace.ResourceCount,
+		SourceName:                 workspace.SourceName,
+		SourceURL:                  workspace.SourceURL,
+		Source:                     "tfe-api",
+		StructuredRunOutputEnabled: workspace.StructuredRunOutputEnabled,
+		LatestChangeAt:             workspace.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Operations:                 true, // workspace is operational
+		Permissions: WorkspacePermissions{
+			CanUpdate: true, CanDestroy: true, CanQueueDestroy: true, CanQueueRun: true,
+			CanUpdateVariable: true, CanLock: true, CanUnlock: true, CanForceUnlock: true,
+			CanReadSettings: true, CanForceDelete: true,
+		},
+		RunTimeout: workspace.RunTimeout, // StackWeaver extension; omitted at 0
 	}
 
-	// go-tfe Description is a plain string, not pointer - always include
-	attributes["description"] = workspace.Description
+	if workspace.AgentPoolID != nil {
+		id := workspace.AgentPoolID.String()
+		attrs.AgentPoolID = &id
+	}
 
-	// TFE API: vcs-repo must be an object matching go-tfe VCSRepo struct exactly
-	// All fields must be present (go-tfe uses plain types, not pointers)
+	// TFE API: vcs-repo must match go-tfe's VCSRepo struct exactly; null when unwired.
 	if workspace.VCSRepository != "" {
 		branch := workspace.VCSBranch
 		if branch == "" {
 			branch = "main"
 		}
-		vcsRepo := gin.H{
-			"identifier":          workspace.VCSRepository,
-			"display-identifier":  workspace.VCSRepository,
-			"branch":              branch,
-			"ingress-submodules":  workspace.VCSIngressSubmodules,
-			"service-provider":    "github",
-			"tags-regex":          workspace.VCSTagsRegex, // Always include (go-tfe is plain string)
-			"repository-http-url": "",
-			"webhook-url":         "",
-			"tags":                false,
+		vcsRepo := &WorkspaceVCSRepo{
+			Identifier:        workspace.VCSRepository,
+			DisplayIdentifier: workspace.VCSRepository,
+			Branch:            branch,
+			IngressSubmodules: workspace.VCSIngressSubmodules,
+			ServiceProvider:   "github",
+			TagsRegex:         workspace.VCSTagsRegex,
 		}
-		// Include the VCS connection reference as github-app-installation-id or oauth-token-id,
-		// and set service-provider to the correct TFE value based on the provider type.
-		ghAppInstallID := ""
-		oauthTokenID := ""
+		// The VCS connection reference rides as github-app-installation-id or oauth-token-id,
+		// and service-provider maps to the correct TFE value per provider type.
 		if workspace.VCSConnectionID != nil {
 			if len(vcsConnRepo) > 0 && vcsConnRepo[0] != nil {
-				vcsConn, err := vcsConnRepo[0].GetByID(*workspace.VCSConnectionID)
-				if err == nil {
-					if vcsConn.InstallationID != "" {
-						ghAppInstallID = vcsConn.InstallationID
-					}
-					// Map provider to TFE service-provider value
+				if vcsConn, err := vcsConnRepo[0].GetByID(*workspace.VCSConnectionID); err == nil {
+					vcsRepo.GithubAppInstallationID = vcsConn.InstallationID
 					switch vcsConn.Provider {
-					case models.VCSProviderGitHub:
-						vcsRepo["service-provider"] = "github"
 					case models.VCSProviderAzureDevOps:
-						vcsRepo["service-provider"] = "ado_services"
+						vcsRepo.ServiceProvider = "ado_services"
 					case models.VCSProviderGitLab:
-						vcsRepo["service-provider"] = "gitlab_hosted"
+						vcsRepo.ServiceProvider = "gitlab_hosted"
 					case models.VCSProviderBitbucket:
-						vcsRepo["service-provider"] = "bitbucket_hosted"
+						vcsRepo.ServiceProvider = "bitbucket_hosted"
+					case models.VCSProviderGitHub:
+						vcsRepo.ServiceProvider = "github"
 					default:
-						vcsRepo["service-provider"] = "github"
+						vcsRepo.ServiceProvider = "github"
 					}
 				}
 			}
-			// If no GitHub App, fall back to treating VCS connection ID as OAuth token
-			if ghAppInstallID == "" {
-				oauthTokenID = workspace.VCSConnectionID.String()
+			// No GitHub App: fall back to treating the connection id as an OAuth token.
+			if vcsRepo.GithubAppInstallationID == "" {
+				vcsRepo.OAuthTokenID = workspace.VCSConnectionID.String()
 			}
 		}
-		vcsRepo["github-app-installation-id"] = ghAppInstallID
-		vcsRepo["oauth-token-id"] = oauthTokenID
-		attributes["vcs-repo"] = vcsRepo
-	} else {
-		attributes["vcs-repo"] = nil
+		attrs.VCSRepo = vcsRepo
 	}
 
-	// TFE API: Additional required/optional fields
-	attributes["actions"] = gin.H{
-		"is-destroyable": true,
-	}
-	attributes["auto-apply-run-trigger"] = workspace.AutoApplyRunTrigger
-	attributes["assessments-enabled"] = workspace.AssessmentsEnabled
-	attributes["force-delete"] = workspace.ForceDelete
-	attributes["environment"] = "default" // TFE default
-	attributes["file-triggers-enabled"] = workspace.FileTriggersEnabled
-	attributes["global-remote-state"] = workspace.GlobalRemoteState
-	attributes["resource-count"] = workspace.ResourceCount
-	if workspace.SourceName != "" {
-		attributes["source-name"] = workspace.SourceName
-	}
-	if workspace.SourceURL != "" {
-		attributes["source-url"] = workspace.SourceURL
-	}
-	attributes["source"] = "tfe-api"
-	attributes["structured-run-output-enabled"] = workspace.StructuredRunOutputEnabled
+	// Trigger prefixes/patterns and tag names: stored as JSON text, emitted as arrays, and an
+	// empty or unparseable value must still emit [] rather than null.
+	attrs.TriggerPrefixes = parseJSONStringList(workspace.TriggerPrefixes)
+	attrs.TriggerPatterns = parseJSONStringList(workspace.TriggerPatterns)
+	attrs.TagNames = parseJSONStringList(workspace.TagNames)
 
-	// Parse trigger-prefixes from JSON or return empty array
-	var triggerPrefixes []string
-	if workspace.TriggerPrefixes != "" {
-		_ = json.Unmarshal([]byte(workspace.TriggerPrefixes), &triggerPrefixes)
-	}
-	if triggerPrefixes == nil {
-		triggerPrefixes = []string{}
-	}
-	attributes["trigger-prefixes"] = triggerPrefixes
-
-	// Parse trigger-patterns from JSON or return empty array
-	var triggerPatterns []string
-	if workspace.TriggerPatterns != "" {
-		_ = json.Unmarshal([]byte(workspace.TriggerPatterns), &triggerPatterns)
-	}
-	if triggerPatterns == nil {
-		triggerPatterns = []string{}
-	}
-	attributes["trigger-patterns"] = triggerPatterns
-
-	// Parse tag-names from JSON or return empty array
-	var tagNames []string
-	if workspace.TagNames != "" {
-		_ = json.Unmarshal([]byte(workspace.TagNames), &tagNames)
-	}
-	if tagNames == nil {
-		tagNames = []string{}
-	}
-	attributes["tag-names"] = tagNames
-
-	attributes["latest-change-at"] = workspace.UpdatedAt.Format("2006-01-02T15:04:05Z")
-	// TFE API: locked-reason is a string or null
 	if workspace.LockedReason != "" {
-		attributes["locked-reason"] = workspace.LockedReason
-	} else {
-		attributes["locked-reason"] = nil
-	}
-	attributes["operations"] = true // Indicates workspace is operational
-	attributes["permissions"] = gin.H{
-		"can-update":          true,
-		"can-destroy":         true,
-		"can-queue-destroy":   true,
-		"can-queue-run":       true,
-		"can-update-variable": true,
-		"can-lock":            true,
-		"can-unlock":          true,
-		"can-force-unlock":    true,
-		"can-read-settings":   true,
-		// terraform-provider-tfe uses the presence of can-force-delete to decide whether this backend
-		// supports workspace safe-delete. Without it, `terraform destroy` refuses unless the user sets
-		// force_delete=true. We DO implement safe-delete (SafeDeleteByID refuses when the workspace has
-		// active infrastructure), so advertise the capability to make tfe_workspace a drop-in.
-		"can-force-delete": true,
+		reason := workspace.LockedReason
+		attrs.LockedReason = &reason
 	}
 
-	// Custom extension: run-timeout (TFE clients will ignore unknown attributes)
-	// This is a StackWeaver-specific feature for preventing stuck applies
-	if workspace.RunTimeout > 0 {
-		attributes["run-timeout"] = workspace.RunTimeout
-	}
-
-	// TFE API: setting-overwrites indicates which settings the workspace defines itself
-	// vs inheriting from org/project defaults. Since we always store explicit values, mark as overwritten.
-	settingOverwrites := gin.H{}
+	// TFE API: setting-overwrites reports which settings the workspace defines itself versus
+	// inheriting; explicit non-remote execution counts as overwritten.
 	if workspace.ExecutionMode != "" && workspace.ExecutionMode != "remote" {
-		settingOverwrites["execution-mode"] = true
-		settingOverwrites["agent-pool"] = workspace.AgentPoolID != nil
-	} else {
-		settingOverwrites["execution-mode"] = false
-		settingOverwrites["agent-pool"] = false
+		attrs.SettingOverwrites = WorkspaceSettingOverwrites{
+			ExecutionMode: true,
+			AgentPool:     workspace.AgentPoolID != nil,
+		}
 	}
-	attributes["setting-overwrites"] = settingOverwrites
 
-	// StackWeaver extensions - extra attributes the frontend needs that aren't in the TFE API.
-	// TFE clients will ignore unknown attributes.
+	// StackWeaver extensions the frontend reads; TFE clients ignore unknown attributes.
 	if workspace.VCSConnectionID != nil {
-		attributes["vcs-connection-id"] = workspace.VCSConnectionID.String()
+		attrs.VCSConnectionID = workspace.VCSConnectionID.String()
 		if workspace.VCSConnection != nil {
-			attributes["vcs-account-name"] = workspace.VCSConnection.AccountName
+			attrs.VCSAccountName = workspace.VCSConnection.AccountName
 		}
 	}
 	if workspace.AgentPoolID != nil && workspace.AgentPool.Name != "" {
-		attributes["agent-pool-name"] = workspace.AgentPool.Name
+		attrs.AgentPoolName = workspace.AgentPool.Name
 	}
 	if workspace.LockedAt != nil {
-		attributes["locked-at"] = workspace.LockedAt.Format("2006-01-02T15:04:05Z")
+		attrs.LockedAt = workspace.LockedAt.Format("2006-01-02T15:04:05Z")
 	}
 
-	// Build relationships
-	relationships := gin.H{}
+	rels := &WorkspaceRelationships{}
 
-	// TFE API: organization relationship (required by tfe provider's workspace read)
+	// TFE API: organization relationship (required by the tfe provider's workspace read).
 	if workspace.Project.OrganizationID != uuid.Nil {
 		orgName := workspace.Project.Organization.Name
 		if orgName == "" {
 			orgName = workspace.Project.OrganizationID.String()
 		}
-		relationships["organization"] = gin.H{
-			"data": gin.H{
-				"id":   orgName,
-				"type": "organizations",
-			},
-		}
+		r := jsonapi.ToOne(orgName, "organizations")
+		rels.Organization = &r
 	}
-
 	if workspace.ProjectID != uuid.Nil {
-		relationships["project"] = gin.H{
-			"data": gin.H{
-				"id":   workspace.ProjectID.String(),
-				"type": "projects",
-			},
-		}
+		r := jsonapi.ToOne(workspace.ProjectID.String(), "projects")
+		rels.Project = &r
 	}
-
-	// TFE API: agent-pool relationship (required by go-tfe client / tfe_workspace_settings)
+	// TFE API: agent-pool is always present - {"data": null} when unpooled (go-tfe /
+	// tfe_workspace_settings read it either way).
 	if workspace.AgentPoolID != nil {
-		relationships["agent-pool"] = gin.H{
-			"data": gin.H{
-				"id":   workspace.AgentPoolID.String(),
-				"type": "agent-pools",
-			},
-		}
+		r := jsonapi.ToOne(workspace.AgentPoolID.String(), "agent-pools")
+		rels.AgentPool = &r
 	} else {
-		relationships["agent-pool"] = gin.H{
-			"data": nil,
-		}
+		rels.AgentPool = &jsonapi.Relationship{}
 	}
-
-	// TFE API: locked-by relationship when workspace is locked
 	if workspace.Locked && workspace.LockedBy != nil {
-		relationships["locked-by"] = gin.H{
-			"data": gin.H{
-				"id":   workspace.LockedBy.String(),
-				"type": "users",
-			},
-			"links": gin.H{
-				"related": "/api/v2/users/" + workspace.LockedBy.String(),
-			},
-		}
+		r := jsonapi.ToOne(workspace.LockedBy.String(), "users")
+		r.Links = jsonapi.RelatedLink{Related: "/api/v2/users/" + workspace.LockedBy.String()}
+		rels.LockedBy = &r
 	}
 
-	return gin.H{
-		"id":            workspace.ID,
-		"type":          "workspaces",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return &WorkspaceResource{
+		ID:            workspace.ID,
+		Type:          "workspaces",
+		Attributes:    attrs,
+		Relationships: rels,
 	}
+}
+
+// parseJSONStringList decodes a JSON-encoded string list, returning [] for empty or invalid
+// input - the members must serialise as arrays, never null.
+func parseJSONStringList(raw string) []string {
+	var out []string
+	if raw != "" {
+		_ = json.Unmarshal([]byte(raw), &out)
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
 }
 
 // formatRunForInclusion formats a run as a lightweight JSON:API resource for sideloading
 // in the workspace list response. Includes only the attributes the frontend needs for
 // workspace cards: status, operation, plan-only, has-changes, timestamps.
-func formatRunForInclusion(run *models.Run) gin.H {
+func formatRunForInclusion(run *models.Run) jsonapi.Resource[IncludedRunAttributes] {
 	planOnly := run.Operation == models.RunOperationPlanOnly
 
-	attributes := gin.H{
-		"status":      string(run.Status),
-		"operation":   string(run.Operation),
-		"is-destroy":  run.Operation == models.RunOperationDestroy,
-		"plan-only":   planOnly,
-		"created-at":  run.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":  run.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-		"has-changes": hasChanges(run),
-		"permissions": gin.H{
-			"can-apply": !planOnly && run.Status == models.RunStatusPlanned,
-		},
+	attrs := IncludedRunAttributes{
+		Status:      string(run.Status),
+		Operation:   string(run.Operation),
+		IsDestroy:   run.Operation == models.RunOperationDestroy,
+		PlanOnly:    planOnly,
+		CreatedAt:   run.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:   run.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		HasChanges:  hasChanges(run),
+		Permissions: IncludedRunPermissions{CanApply: !planOnly && run.Status == models.RunStatusPlanned},
 	}
 	if run.CompletedAt != nil {
-		attributes["completed-at"] = run.CompletedAt.Format("2006-01-02T15:04:05Z")
+		attrs.CompletedAt = run.CompletedAt.Format("2006-01-02T15:04:05Z")
 	}
 
-	return gin.H{
-		"id":         run.ID,
-		"type":       "runs",
-		"attributes": attributes,
-		"relationships": gin.H{
-			"workspace": gin.H{
-				"data": gin.H{
-					"id":   run.WorkspaceID,
-					"type": "workspaces",
-				},
-			},
-		},
+	return jsonapi.Resource[IncludedRunAttributes]{
+		ID:            run.ID,
+		Type:          "runs",
+		Attributes:    attrs,
+		Relationships: IncludedRunRelationships{Workspace: jsonapi.ToOne(run.WorkspaceID, "workspaces")},
 	}
 }
 
@@ -1079,15 +925,7 @@ func (h *WorkspaceHandlerV2) GetByOrganizationAndName(c *gin.Context) {
 
 	workspace, err := h.workspaceRepo.GetByOrganizationAndName(orgName, workspaceName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -1105,29 +943,13 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -1136,15 +958,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	// We allow both to create workspaces (members can do day-to-day tasks)
 	hasManageWorkspaces, err := h.rbacService.CheckOrgManageWorkspaces(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 
@@ -1152,43 +966,19 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	// If user doesn't have org-level manage permission, they cannot create workspaces
 	// Workspace creation requires org-level manage permission (users get workspace access via project/workspace team access)
 	if !hasManageWorkspaces {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "You do not have permission to create workspaces. Workspace creation requires organization-level manage-workspaces permission via team membership.",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create workspaces. Workspace creation requires organization-level manage-workspaces permission via team membership.")
 		return
 	}
 
 	var req CreateWorkspaceRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	// Extract from JSON:API format (TFE-compatible)
 	if req.Data.Attributes.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Workspace name is required (provide 'data.attributes.name')",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Workspace name is required (provide 'data.attributes.name')")
 		return
 	}
 
@@ -1243,15 +1033,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 
 	// Validate workspace name is not empty
 	if workspaceName == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Workspace name cannot be empty",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Workspace name cannot be empty")
 		return
 	}
 
@@ -1268,27 +1050,11 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		// docs/internal/bug-reports/platform/e2e-stale-seed-data-shadows-dev-defaults.md.
 		project, err := h.projectRepo.GetByID(*projectID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": fmt.Sprintf("Project %s does not exist", projectID.String()),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", fmt.Sprintf("Project %s does not exist", projectID.String()))
 			return
 		}
 		if project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": fmt.Sprintf("Project %s belongs to a different organization than %s", projectID.String(), org.Name),
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", fmt.Sprintf("Project %s belongs to a different organization than %s", projectID.String(), org.Name))
 			return
 		}
 		finalProjectID = *projectID
@@ -1296,15 +1062,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		// Try to find default project first, then fall back to first project
 		projects, _, err := h.projectRepo.ListByOrganization(org.ID, 100, 0) // Get all projects to find "default"
 		if err != nil || len(projects) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "Organization must have at least one project to create workspaces",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Organization must have at least one project to create workspaces")
 			return
 		}
 
@@ -1330,29 +1088,13 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		// Validate VCS connection exists
 		_, err := h.vcsConnectionRepo.GetByID(*vcsConnectionID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "VCS connection not found",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "VCS connection not found")
 			return
 		}
 
 		// If VCS connection is provided, repository should also be provided
 		if vcsRepository == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "vcs_repository is required when vcs_connection_id is provided",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "vcs_repository is required when vcs_connection_id is provided")
 			return
 		}
 	}
@@ -1379,15 +1121,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	// Check for duplicate workspace name in project
 	existing, _ := h.workspaceRepo.GetByProjectAndName(finalProjectID, workspaceName)
 	if existing != nil {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Workspace with this name already exists",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace with this name already exists")
 		return
 	}
 
@@ -1401,13 +1135,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		var tfVersion models.TofuVersion
 		if err := h.db.Where("version = ? AND enabled = ?", terraformVersion, true).First(&tfVersion).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
-				c.JSON(http.StatusUnprocessableEntity, gin.H{
-					"errors": []gin.H{{
-						"status": "422",
-						"title":  "Invalid terraform version",
-						"detail": fmt.Sprintf("Terraform version %s is not available. Use GET /api/v2/admin/terraform-versions to list available versions.", terraformVersion),
-					}},
-				})
+				jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid terraform version", fmt.Sprintf("Terraform version %s is not available. Use GET /api/v2/admin/terraform-versions to list available versions.", terraformVersion))
 				return
 			}
 		}
@@ -1499,7 +1227,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		poolID, err := uuid.Parse(*attrs.AgentPoolID)
 		if err == nil {
 			if allowed, reason := h.validatePoolAccess(poolID, workspace.ID, &workspace.ProjectID); !allowed {
-				c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Invalid Agent Pool", "detail": reason}}})
+				jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Agent Pool", reason)
 				return
 			}
 			workspace.AgentPoolID = &poolID
@@ -1507,15 +1235,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	}
 
 	if err := h.workspaceRepo.Create(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to create workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create workspace")
 		return
 	}
 
@@ -1543,15 +1263,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 	// Reload workspace from database to ensure all fields (CreatedAt, UpdatedAt, etc.) are populated
 	createdWorkspace, err := h.workspaceRepo.GetByID(workspace.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to retrieve created workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to retrieve created workspace")
 		return
 	}
 
@@ -1564,9 +1276,7 @@ func (h *WorkspaceHandlerV2) Create(c *gin.Context) {
 		_ = h.activityService.LogCreate(c.Request.Context(), "workspace", createdWorkspace.ID, createdWorkspace.Name, activityCtx)
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatWorkspaceResponse(createdWorkspace, h.vcsConnectionRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatWorkspaceResponse(createdWorkspace, h.vcsConnectionRepo))
 }
 
 // Update updates a workspace by organization name and workspace name (TFE-compatible)
@@ -1577,59 +1287,27 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 
 	workspace, err := h.workspaceRepo.GetByOrganizationAndName(orgName, workspaceName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	var req UpdateWorkspaceRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": err.Error(),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	// Get organization for validation
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// Verify user has permission to update workspace
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -1637,15 +1315,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 	// Check org-level permission first (admins have PermissionOrgManageWorkspaces)
 	hasOrgManage, err := h.rbacService.CheckOrgManageWorkspaces(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 
@@ -1660,15 +1330,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 			workspace.ProjectID,
 		)
 		if err != nil || !hasWorkspaceWrite {
-			c.JSON(http.StatusForbidden, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "403",
-						"title":  "Forbidden",
-						"detail": "Only organization admins and members with workspace access can update workspaces",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Only organization admins and members with workspace access can update workspaces")
 			return
 		}
 	}
@@ -1685,15 +1347,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 		if attrs.Name != workspace.Name {
 			existing, _ := h.workspaceRepo.GetByProjectAndName(workspace.ProjectID, attrs.Name)
 			if existing != nil {
-				c.JSON(http.StatusConflict, gin.H{
-					"errors": []gin.H{
-						{
-							"status": "409",
-							"title":  "Conflict",
-							"detail": "Workspace with this name already exists",
-						},
-					},
-				})
+				jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace with this name already exists")
 				return
 			}
 			changes["name"] = attrs.Name
@@ -1745,15 +1399,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 		// Validate VCS connection exists
 		_, err := h.vcsConnectionRepo.GetByID(*attrs.VCSConnectionID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "VCS connection not found",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "VCS connection not found")
 			return
 		}
 
@@ -1782,15 +1428,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 			finalVCSConnectionID = attrs.VCSConnectionID
 		}
 		if finalVCSConnectionID != nil && attrs.VCSRepository == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "400",
-						"title":  "Bad Request",
-						"detail": "vcs_repository is required when vcs_connection_id is set",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "vcs_repository is required when vcs_connection_id is set")
 			return
 		}
 		if workspace.VCSRepository != attrs.VCSRepository {
@@ -1867,7 +1505,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 			poolID, err := uuid.Parse(*attrs.AgentPoolID)
 			if err == nil {
 				if allowed, reason := h.validatePoolAccess(poolID, workspace.ID, &workspace.ProjectID); !allowed {
-					c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Invalid Agent Pool", "detail": reason}}})
+					jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Agent Pool", reason)
 					return
 				}
 				if workspace.AgentPoolID == nil || *workspace.AgentPoolID != poolID {
@@ -1982,15 +1620,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 	}
 
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to update workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update workspace")
 		return
 	}
 
@@ -2010,9 +1640,7 @@ func (h *WorkspaceHandlerV2) Update(c *gin.Context) {
 		_ = h.activityService.LogUpdate(c.Request.Context(), "workspace", workspace.ID, workspace.Name, changes, activityCtx)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatWorkspaceResponse(workspace, h.vcsConnectionRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceResponse(workspace, h.vcsConnectionRepo))
 }
 
 // Delete deletes a workspace by organization name and workspace name (TFE-compatible)
@@ -2023,60 +1651,28 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 
 	workspace, err := h.workspaceRepo.GetByOrganizationAndName(orgName, workspaceName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	// Get organization for validation and activity logging
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Organization not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// Check if user has permission to delete workspace
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	// Check org-level permission first (admins have PermissionOrgManageWorkspaces)
 	hasOrgManage, err := h.rbacService.CheckOrgManageWorkspaces(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 
@@ -2090,15 +1686,7 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 			workspace.ProjectID,
 		)
 		if err != nil || !hasWorkspaceWrite {
-			c.JSON(http.StatusForbidden, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "403",
-						"title":  "Forbidden",
-						"detail": "Only organization admins and members with workspace access can delete workspaces",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Only organization admins and members with workspace access can delete workspaces")
 			return
 		}
 	}
@@ -2116,27 +1704,11 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 	if !forceDelete {
 		hasActiveInfrastructure, err := h.workspaceRepo.HasActiveInfrastructure(workspace.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "500",
-						"title":  "Internal Server Error",
-						"detail": "Failed to check workspace runs",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check workspace runs")
 			return
 		}
 		if hasActiveInfrastructure {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": "Cannot delete workspace with active infrastructure. Please run a destroy operation first, or use force delete.",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Cannot delete workspace with active infrastructure. Please run a destroy operation first, or use force delete.")
 			return
 		}
 	}
@@ -2153,15 +1725,7 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 
 	if err := h.workspaceRepo.Delete(workspace.ID); err != nil {
 		logger.Errorf("Failed to delete workspace %s: %v", workspace.ID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": fmt.Sprintf("Failed to delete workspace: %v", err),
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to delete workspace: %v", err))
 		return
 	}
 
@@ -2179,9 +1743,7 @@ func (h *WorkspaceHandlerV2) Delete(c *gin.Context) {
 func (h *WorkspaceHandlerV2) authorizeWorkspaceWriteByID(c *gin.Context, workspace *models.Workspace) bool {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return false
 	}
 
@@ -2189,17 +1751,13 @@ func (h *WorkspaceHandlerV2) authorizeWorkspaceWriteByID(c *gin.Context, workspa
 	// the org-admin shortcut the org+name handlers use.
 	project, err := h.projectRepo.GetByID(workspace.ProjectID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to resolve workspace organization"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to resolve workspace organization")
 		return false
 	}
 
 	hasOrgManage, err := h.rbacService.CheckOrgManageWorkspaces(c.Request.Context(), user.ID, project.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return false
 	}
 	if hasOrgManage {
@@ -2211,9 +1769,7 @@ func (h *WorkspaceHandlerV2) authorizeWorkspaceWriteByID(c *gin.Context, workspa
 		c.Request.Context(), user.ID, workspace.ID, rbac.PermissionWorkspaceWrite, workspace.ProjectID,
 	)
 	if err != nil || !hasWorkspaceWrite {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "Only organization admins and members with workspace access can modify workspaces"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Only organization admins and members with workspace access can modify workspaces")
 		return false
 	}
 	return true
@@ -2228,23 +1784,17 @@ func (h *WorkspaceHandlerV2) authorizeWorkspaceWriteByID(c *gin.Context, workspa
 func (h *WorkspaceHandlerV2) authorizeWorkspaceRead(c *gin.Context, workspace *models.Workspace) bool {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return false
 	}
 	project, err := h.projectRepo.GetByID(workspace.ProjectID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to resolve workspace organization"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to resolve workspace organization")
 		return false
 	}
 	inOrg, err := h.orgRepo.UserInOrg(user.ID, project.OrganizationID)
 	if err != nil || !inOrg {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You must be a member of this organization (via team membership)"}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You must be a member of this organization (via team membership)")
 		return false
 	}
 	return true
@@ -2256,9 +1806,7 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 	id := c.Param("id")
 	workspace, err := h.workspaceRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -2273,9 +1821,7 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 	if !org.AllowForceDeleteWorkspaces {
 		user, uerr := h.authService.GetUserFromContext(c)
 		if uerr != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}},
-			})
+			jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 			return
 		}
 		if !h.authorizeForceDelete(c, user.ID, org.ID, workspace.ID) {
@@ -2285,9 +1831,7 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 
 	// Force delete by ID (TFE behavior: DELETE /workspaces/:id is force delete)
 	if err := h.workspaceRepo.Delete(workspace.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to delete workspace: %v", err)}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to delete workspace: %v", err))
 		return
 	}
 
@@ -2301,9 +1845,7 @@ func (h *WorkspaceHandlerV2) DeleteByID(c *gin.Context) {
 func (h *WorkspaceHandlerV2) authorizeForceDelete(c *gin.Context, userID, orgID uuid.UUID, workspaceID string) bool {
 	hasActive, err := h.workspaceRepo.HasActiveInfrastructure(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check workspace runs"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check workspace runs")
 		return false
 	}
 	if !hasActive {
@@ -2311,19 +1853,11 @@ func (h *WorkspaceHandlerV2) authorizeForceDelete(c *gin.Context, userID, orgID 
 	}
 	isOwner, err := h.rbacService.CheckOrgManageMembership(c.Request.Context(), userID, orgID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return false
 	}
 	if !isOwner {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{{
-				"status": "403",
-				"title":  "Forbidden",
-				"detail": "Force-deleting a workspace with resources under management requires organization owner permissions, or enable allow-force-delete-workspaces on the organization",
-			}},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Force-deleting a workspace with resources under management requires organization owner permissions, or enable allow-force-delete-workspaces on the organization")
 		return false
 	}
 	return true
@@ -2342,9 +1876,7 @@ func (h *WorkspaceHandlerV2) SafeDeleteByID(c *gin.Context) {
 	id := c.Param("id")
 	workspace, err := h.workspaceRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -2355,22 +1887,16 @@ func (h *WorkspaceHandlerV2) SafeDeleteByID(c *gin.Context) {
 	// Safe delete: check for active infrastructure
 	hasActiveInfrastructure, err := h.workspaceRepo.HasActiveInfrastructure(workspace.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to check workspace runs"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check workspace runs")
 		return
 	}
 	if hasActiveInfrastructure {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{{"status": "409", "title": "Conflict", "detail": "Cannot delete workspace with active infrastructure. Please run a destroy operation first."}},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Cannot delete workspace with active infrastructure. Please run a destroy operation first.")
 		return
 	}
 
 	if err := h.workspaceRepo.Delete(workspace.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": fmt.Sprintf("Failed to delete workspace: %v", err)}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", fmt.Sprintf("Failed to delete workspace: %v", err))
 		return
 	}
 
@@ -2387,15 +1913,7 @@ type LockRequest struct {
 func (h *WorkspaceHandlerV2) Lock(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
@@ -2406,70 +1924,30 @@ func (h *WorkspaceHandlerV2) Lock(c *gin.Context) {
 
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	if workspace.Locked {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Workspace is already locked",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace is already locked")
 		return
 	}
 
 	// Get current user for permission check and locking
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	// Check workspace locking permission using RBAC service
 	hasPermission, err := h.rbacService.CheckWorkspaceLockingPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to lock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to lock workspace")
 		return
 	}
 
@@ -2482,24 +1960,14 @@ func (h *WorkspaceHandlerV2) Lock(c *gin.Context) {
 	workspace.LockedReason = lockReq.Reason
 
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to lock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to lock workspace")
 		return
 	}
 
 	// Reload to get updated workspace
 	workspace, _ = h.workspaceRepo.GetByID(workspaceID)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatWorkspaceResponse(workspace, h.vcsConnectionRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceResponse(workspace, h.vcsConnectionRepo))
 }
 
 // Unlock unlocks a workspace manually
@@ -2507,84 +1975,36 @@ func (h *WorkspaceHandlerV2) Lock(c *gin.Context) {
 func (h *WorkspaceHandlerV2) Unlock(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	if !workspace.Locked {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Workspace is not locked",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace is not locked")
 		return
 	}
 
 	// Get current user for permission check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "401",
-					"title":  "Unauthorized",
-					"detail": "Authentication required",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	// Check workspace locking permission using RBAC service
 	hasPermission, err := h.rbacService.CheckWorkspaceLockingPermission(c.Request.Context(), user.ID, workspaceID, workspace.ProjectID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to check permissions",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "403",
-					"title":  "Forbidden",
-					"detail": "Insufficient permissions to unlock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Insufficient permissions to unlock workspace")
 		return
 	}
 
@@ -2594,15 +2014,7 @@ func (h *WorkspaceHandlerV2) Unlock(c *gin.Context) {
 		// Check if user has admin permissions (org admin or workspace write)
 		hasAdmin, err := h.rbacService.CheckWorkspacePermission(c.Request.Context(), user.ID, workspaceID, rbac.PermissionWorkspaceWrite, workspace.ProjectID)
 		if err != nil || !hasAdmin {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{
-						"status": "409",
-						"title":  "Conflict",
-						"detail": "Workspace is locked by a different user",
-					},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace is locked by a different user")
 			return
 		}
 	}
@@ -2613,24 +2025,14 @@ func (h *WorkspaceHandlerV2) Unlock(c *gin.Context) {
 	workspace.LockedReason = ""
 
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to unlock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to unlock workspace")
 		return
 	}
 
 	// Reload to get updated workspace
 	workspace, _ = h.workspaceRepo.GetByID(workspaceID)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatWorkspaceResponse(workspace, h.vcsConnectionRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceResponse(workspace, h.vcsConnectionRepo))
 }
 
 // ForceUnlock force unlocks a workspace (admin only)
@@ -2638,42 +2040,18 @@ func (h *WorkspaceHandlerV2) Unlock(c *gin.Context) {
 func (h *WorkspaceHandlerV2) ForceUnlock(c *gin.Context) {
 	workspaceID := c.Param("id")
 	if workspaceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(workspaceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
 	if !workspace.Locked {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "409",
-					"title":  "Conflict",
-					"detail": "Workspace is already unlocked",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Workspace is already unlocked")
 		return
 	}
 
@@ -2684,24 +2062,14 @@ func (h *WorkspaceHandlerV2) ForceUnlock(c *gin.Context) {
 	workspace.LockedReason = ""
 
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "500",
-					"title":  "Internal Server Error",
-					"detail": "Failed to force unlock workspace",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to force unlock workspace")
 		return
 	}
 
 	// Reload to get updated workspace
 	workspace, _ = h.workspaceRepo.GetByID(workspaceID)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatWorkspaceResponse(workspace, h.vcsConnectionRepo),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatWorkspaceResponse(workspace, h.vcsConnectionRepo))
 }
 
 // GetByID gets a workspace by ID (internal API)
@@ -2709,29 +2077,13 @@ func (h *WorkspaceHandlerV2) ForceUnlock(c *gin.Context) {
 func (h *WorkspaceHandlerV2) GetByID(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "400",
-					"title":  "Bad Request",
-					"detail": "Invalid workspace ID",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{
-					"status": "404",
-					"title":  "Not Found",
-					"detail": "Workspace not found",
-				},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -2748,17 +2100,13 @@ func (h *WorkspaceHandlerV2) GetByID(c *gin.Context) {
 func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 	id := c.Param("id")
 	if id == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid workspace ID"}},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid workspace ID")
 		return
 	}
 
 	workspace, err := h.workspaceRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 		return
 	}
 
@@ -2768,9 +2116,7 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 
 	var req UpdateWorkspaceRequestV2
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -2825,7 +2171,7 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 			poolID, parseErr := uuid.Parse(*attrs.AgentPoolID)
 			if parseErr == nil {
 				if allowed, reason := h.validatePoolAccess(poolID, workspace.ID, &workspace.ProjectID); !allowed {
-					c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Invalid Agent Pool", "detail": reason}}})
+					jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Invalid Agent Pool", reason)
 					return
 				}
 				workspace.AgentPoolID = &poolID
@@ -2959,9 +2305,7 @@ func (h *WorkspaceHandlerV2) UpdateByID(c *gin.Context) {
 	}
 
 	if err := h.workspaceRepo.Update(workspace); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to update workspace"}},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update workspace")
 		return
 	}
 

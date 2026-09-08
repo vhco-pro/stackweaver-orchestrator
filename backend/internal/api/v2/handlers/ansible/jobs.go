@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/apierror"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -111,22 +112,14 @@ func (h *JobHandler) ListByProject(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -139,19 +132,11 @@ func (h *JobHandler) ListByProject(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to list jobs in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to list jobs in this project")
 		return
 	}
 
@@ -161,27 +146,15 @@ func (h *JobHandler) ListByProject(c *gin.Context) {
 	if groupStr := c.Query("filter[slice-group-id]"); groupStr != "" {
 		groupID, parseErr := uuid.Parse(groupStr)
 		if parseErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{
-				"status": "400", "title": "Bad Request", "detail": "Invalid filter[slice-group-id]: must be a UUID",
-			}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid filter[slice-group-id]: must be a UUID")
 			return
 		}
 		siblings, listErr := h.jobService.ListJobsBySliceGroup(projectID, groupID)
 		if listErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{
-				"status": "500", "title": "Internal Server Error", "detail": "Failed to list jobs",
-			}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list jobs")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"data": formatJobsResponse(siblings),
-			"meta": gin.H{"pagination": gin.H{
-				"current-page": 1,
-				"page-size":    len(siblings),
-				"total-count":  len(siblings),
-				"total-pages":  1,
-			}},
-		})
+		jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobsResponse(siblings), jsonapi.NewPaginationMeta(1, len(siblings), int64(len(siblings))))
 		return
 	}
 
@@ -194,25 +167,11 @@ func (h *JobHandler) ListByProject(c *gin.Context) {
 
 	jobs, total, err := h.jobService.ListJobsByProject(projectID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list jobs"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list jobs")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobsResponse(jobs),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobsResponse(jobs), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // ListByOrganization lists all jobs for an organization
@@ -222,40 +181,24 @@ func (h *JobHandler) ListByOrganization(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to list jobs in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to list jobs in this organization")
 		return
 	}
 
@@ -268,25 +211,11 @@ func (h *JobHandler) ListByOrganization(c *gin.Context) {
 
 	jobs, total, err := h.jobService.ListJobsByOrganization(org.ID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list jobs"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list jobs")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobsResponse(jobs),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatJobsResponse(jobs), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetQueue gets the job queue for an organization
@@ -296,40 +225,24 @@ func (h *JobHandler) GetQueue(c *gin.Context) {
 
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to view the job queue for this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to view the job queue for this organization")
 		return
 	}
 
@@ -340,17 +253,11 @@ func (h *JobHandler) GetQueue(c *gin.Context) {
 
 	jobs, err := h.jobService.GetJobQueue(org.ID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to get job queue"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get job queue")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobsResponse(jobs),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatJobsResponse(jobs))
 }
 
 // Launch launches a new job
@@ -359,43 +266,27 @@ func (h *JobHandler) Launch(c *gin.Context) {
 	projectIDStr := c.Param("id")
 	projectID, err := uuid.Parse(projectIDStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 		return
 	}
 
 	var req LaunchJobRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	// Parse playbook ID
 	playbookID, err := uuid.Parse(req.Data.Relationships.Playbook.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	// Parse inventory ID
 	inventoryID, err := uuid.Parse(req.Data.Relationships.Inventory.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -404,11 +295,7 @@ func (h *JobHandler) Launch(c *gin.Context) {
 	for _, ref := range req.Data.Relationships.Credentials.Data {
 		cid, err := uuid.Parse(ref.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid credential ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid credential ID")
 			return
 		}
 		credentialIDs = append(credentialIDs, cid)
@@ -428,11 +315,7 @@ func (h *JobHandler) Launch(c *gin.Context) {
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -445,19 +328,11 @@ func (h *JobHandler) Launch(c *gin.Context) {
 		&projectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to launch jobs in this project"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to launch jobs in this project")
 		return
 	}
 
@@ -484,11 +359,7 @@ func (h *JobHandler) Launch(c *gin.Context) {
 
 	job, err := h.jobService.LaunchJob(context.Background(), input)
 	if errors.Is(err, ansible.ErrTemplateDisabled) {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{"status": "409", "title": "Conflict", "detail": "Job template is disabled"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Job template is disabled")
 		return
 	}
 	if err != nil {
@@ -497,9 +368,7 @@ func (h *JobHandler) Launch(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobResponse(job))
 }
 
 // LaunchByOrganization launches a new job (org-scoped, TFE-compatible pattern)
@@ -508,50 +377,30 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to launch jobs in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to launch jobs in this organization")
 		return
 	}
 
 	var req LaunchJobRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -560,21 +409,13 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 	if req.Data.Relationships.Project.Data != nil && req.Data.Relationships.Project.Data.ID != "" {
 		pid, err := uuid.Parse(req.Data.Relationships.Project.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		// Validate project belongs to organization
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to this organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to this organization")
 			return
 		}
 		projectID = pid
@@ -582,11 +423,7 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 		// Use first project in organization (TFE-compatible behavior)
 		projects, _, err := h.projectRepo.ListByOrganization(org.ID, 1, 0)
 		if err != nil || len(projects) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Organization must have at least one project to launch jobs"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Organization must have at least one project to launch jobs")
 			return
 		}
 		projectID = projects[0].ID
@@ -595,22 +432,14 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 	// Parse playbook ID
 	playbookID, err := uuid.Parse(req.Data.Relationships.Playbook.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid playbook ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid playbook ID")
 		return
 	}
 
 	// Parse inventory ID
 	inventoryID, err := uuid.Parse(req.Data.Relationships.Inventory.Data.ID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
@@ -619,11 +448,7 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 	for _, ref := range req.Data.Relationships.Credentials.Data {
 		cid, err := uuid.Parse(ref.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid credential ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid credential ID")
 			return
 		}
 		credentialIDs = append(credentialIDs, cid)
@@ -663,11 +488,7 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 
 	job, err := h.jobService.LaunchJob(context.Background(), input)
 	if errors.Is(err, ansible.ErrTemplateDisabled) {
-		c.JSON(http.StatusConflict, gin.H{
-			"errors": []gin.H{
-				{"status": "409", "title": "Conflict", "detail": "Job template is disabled"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Job template is disabled")
 		return
 	}
 	if err != nil {
@@ -676,9 +497,7 @@ func (h *JobHandler) LaunchByOrganization(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobResponse(job))
 }
 
 // Get retrieves a job by ID
@@ -687,32 +506,20 @@ func (h *JobHandler) Get(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	job, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -725,25 +532,15 @@ func (h *JobHandler) Get(c *gin.Context) {
 		&job.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to view this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to view this job")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatJobResponse(job))
 }
 
 // Cancel cancels a job
@@ -752,32 +549,20 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	existingJob, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -790,35 +575,21 @@ func (h *JobHandler) Cancel(c *gin.Context) {
 		&existingJob.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to cancel this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to cancel this job")
 		return
 	}
 
 	job, err := h.jobService.CancelJob(id)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatJobResponse(job))
 }
 
 // Relaunch relaunches a job
@@ -827,32 +598,20 @@ func (h *JobHandler) Relaunch(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	existingJob, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -871,19 +630,11 @@ func (h *JobHandler) Relaunch(c *gin.Context) {
 		&existingJob.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to relaunch this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to relaunch this job")
 		return
 	}
 
@@ -896,9 +647,7 @@ func (h *JobHandler) Relaunch(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobResponse(job))
 }
 
 // Delete deletes a job
@@ -907,32 +656,20 @@ func (h *JobHandler) Delete(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	existingJob, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -945,19 +682,11 @@ func (h *JobHandler) Delete(c *gin.Context) {
 		&existingJob.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to delete this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to delete this job")
 		return
 	}
 
@@ -987,32 +716,20 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	job, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -1025,19 +742,11 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 		&job.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to view events for this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to view events for this job")
 		return
 	}
 
@@ -1052,10 +761,7 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 
 	if status := c.Query("filter[status]"); status != "" {
 		if !validEventStatuses[status] {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{
-				"status": "400", "title": "Bad Request",
-				"detail": "Invalid filter[status]: must be one of ok, changed, failed, unreachable, skipped",
-			}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid filter[status]: must be one of ok, changed, failed, unreachable, skipped")
 			return
 		}
 		filter.Status = status
@@ -1064,9 +770,7 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 	if counterStr := c.Query("filter[counter]"); counterStr != "" {
 		counter, parseErr := strconv.Atoi(counterStr)
 		if parseErr != nil || counter < 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{
-				"status": "400", "title": "Bad Request", "detail": "Invalid filter[counter]: must be a non-negative integer",
-			}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid filter[counter]: must be a non-negative integer")
 			return
 		}
 		filter.Counter = &counter
@@ -1078,9 +782,7 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 	summary := false
 	if fields := c.Query("fields[events]"); fields != "" {
 		if fields != "summary" {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{
-				"status": "400", "title": "Bad Request", "detail": "Invalid fields[events]: the only supported value is \"summary\"",
-			}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid fields[events]: the only supported value is \"summary\"")
 			return
 		}
 		summary = true
@@ -1092,16 +794,16 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 	if afterStr := c.Query("after"); afterStr != "" {
 		after, parseErr := strconv.Atoi(afterStr)
 		if parseErr != nil || after < 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "Invalid after parameter"}}})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid after parameter")
 			return
 		}
 		filter.After = &after
 		events, _, listErr := h.jobService.GetJobEventsFiltered(id, filter, maxEventsPerPoll, 0)
 		if listErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to get job events"}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get job events")
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"data": formatEventsResponse(events, summary)})
+		jsonapi.WriteDocument(c, http.StatusOK, formatEventsResponse(events, summary))
 		return
 	}
 
@@ -1114,25 +816,11 @@ func (h *JobHandler) GetEvents(c *gin.Context) {
 
 	events, total, err := h.jobService.GetJobEventsFiltered(id, filter, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to get job events"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get job events")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatEventsResponse(events, summary),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatEventsResponse(events, summary), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // GetOutput retrieves the combined output for a job
@@ -1141,32 +829,20 @@ func (h *JobHandler) GetOutput(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid job ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid job ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	job, err := h.jobService.GetJob(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Job not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Job not found")
 		return
 	}
 
@@ -1179,35 +855,21 @@ func (h *JobHandler) GetOutput(c *gin.Context) {
 		&job.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to view output for this job"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to view output for this job")
 		return
 	}
 
 	output, err := h.jobService.GetJobOutput(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to get job output"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get job output")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": output,
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, output)
 }
 
 // LaunchFromTemplate launches a job from a template
@@ -1216,32 +878,20 @@ func (h *JobHandler) LaunchFromTemplate(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid template ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid template ID")
 		return
 	}
 
 	// RBAC check
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
 	template, err := h.templateRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Template not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Template not found")
 		return
 	}
 
@@ -1254,19 +904,11 @@ func (h *JobHandler) LaunchFromTemplate(c *gin.Context) {
 		&template.ProjectID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You don't have permission to launch jobs from this template"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You don't have permission to launch jobs from this template")
 		return
 	}
 
@@ -1281,11 +923,7 @@ func (h *JobHandler) LaunchFromTemplate(c *gin.Context) {
 	job, err := h.jobService.LaunchFromTemplate(context.Background(), id, req.Data.Attributes.ExtraVars, createdBy)
 	if err != nil {
 		if errors.Is(err, ansible.ErrTemplateDisabled) {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{"status": "409", "title": "Conflict", "detail": "Job template is disabled"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Job template is disabled")
 			return
 		}
 		// AUD-063: don't echo the raw service error to the client.
@@ -1293,157 +931,119 @@ func (h *JobHandler) LaunchFromTemplate(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatJobResponse(job),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatJobResponse(job))
 }
 
 // formatJobResponse formats a job for JSON:API response
-func formatJobResponse(job *models.AnsibleJob) gin.H {
-	attributes := gin.H{
-		"name":              job.Name,
-		"job-type":          job.JobType,
-		"status":            job.Status,
-		"extra-vars":        job.ExtraVars,
-		"limit":             job.Limit,
-		"tags":              job.Tags,
-		"skip-tags":         job.SkipTags,
-		"verbosity":         job.Verbosity,
-		"forks":             job.Forks,
-		"become-enabled":    job.BecomeEnabled,
-		"slice-number":      job.SliceNumber,
-		"slice-count":       job.SliceCount,
-		"slice-group-id":    nil,
-		"runner-id":         nil,
-		"diff-mode":         job.DiffMode,
-		"ansible-version":   job.AnsibleVersion,
-		"exit-code":         job.ExitCode,
-		"error-message":     job.ErrorMessage,
-		"started-at":        nil,
-		"finished-at":       nil,
-		"hosts-total":       job.HostsTotal,
-		"hosts-ok":          job.HostsOk,
-		"hosts-changed":     job.HostsChanged,
-		"hosts-failed":      job.HostsFailed,
-		"hosts-unreachable": job.HostsUnreachable,
-		"hosts-skipped":     job.HostsSkipped,
-		"hosts-rescued":     job.HostsRescued,
-		"hosts-ignored":     job.HostsIgnored,
-		"has-warnings":      job.HasWarnings,
-		"warnings-count":    job.WarningsCount,
-		"created-at":        job.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":        job.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+func formatJobResponse(job *models.AnsibleJob) jsonapi.Resource[JobAttributes] {
+	attributes := JobAttributes{
+		Name:             job.Name,
+		JobType:          job.JobType,
+		Status:           job.Status,
+		ExtraVars:        job.ExtraVars,
+		Limit:            job.Limit,
+		Tags:             job.Tags,
+		SkipTags:         job.SkipTags,
+		Verbosity:        job.Verbosity,
+		Forks:            job.Forks,
+		BecomeEnabled:    job.BecomeEnabled,
+		SliceNumber:      job.SliceNumber,
+		SliceCount:       job.SliceCount,
+		DiffMode:         job.DiffMode,
+		AnsibleVersion:   job.AnsibleVersion,
+		ExitCode:         job.ExitCode,
+		ErrorMessage:     job.ErrorMessage,
+		HostsTotal:       job.HostsTotal,
+		HostsOk:          job.HostsOk,
+		HostsChanged:     job.HostsChanged,
+		HostsFailed:      job.HostsFailed,
+		HostsUnreachable: job.HostsUnreachable,
+		HostsSkipped:     job.HostsSkipped,
+		HostsRescued:     job.HostsRescued,
+		HostsIgnored:     job.HostsIgnored,
+		HasWarnings:      job.HasWarnings,
+		WarningsCount:    job.WarningsCount,
+		CreatedAt:        job.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:        job.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	if job.JobType == models.AnsibleJobTypeAdHoc {
-		attributes["module"] = job.Module
-		attributes["module-args"] = job.ModuleArgs
+		attributes.Module = job.Module
+		attributes.ModuleArgs = job.ModuleArgs
 	}
-
 	if job.StartedAt != nil {
-		attributes["started-at"] = job.StartedAt.Format("2006-01-02T15:04:05Z")
+		v := job.StartedAt.Format("2006-01-02T15:04:05Z")
+		attributes.StartedAt = &v
 	}
 	if job.FinishedAt != nil {
-		attributes["finished-at"] = job.FinishedAt.Format("2006-01-02T15:04:05Z")
+		v := job.FinishedAt.Format("2006-01-02T15:04:05Z")
+		attributes.FinishedAt = &v
 	}
 	// Slice group ties sibling slices of one launch together; runner-id reveals
 	// which agent executed the slice. Both are needed to verify, end-to-end, that
 	// slicing fans out across distinct runners with a correct host partition.
 	if job.SliceGroupID != nil {
-		attributes["slice-group-id"] = job.SliceGroupID.String()
+		v := job.SliceGroupID.String()
+		attributes.SliceGroupID = &v
 	}
 	if job.RunnerID != nil {
-		attributes["runner-id"] = job.RunnerID.String()
+		v := job.RunnerID.String()
+		attributes.RunnerID = &v
 	}
 
-	relationships := gin.H{
-		"project": gin.H{
-			"data": gin.H{
-				"id":   job.ProjectID.String(),
-				"type": "projects",
-			},
-		},
-		"inventory": gin.H{
-			"data": gin.H{
-				"id":   job.InventoryID.String(),
-				"type": "ansible-inventories",
-			},
-		},
+	relationships := JobRelationships{
+		Project:   jsonapi.ToOne(job.ProjectID.String(), "projects"),
+		Inventory: jsonapi.ToOne(job.InventoryID.String(), "ansible-inventories"),
 	}
 
-	// Ad hoc jobs have no playbook (transient playbook generated by the runner)
+	// Ad hoc jobs have no playbook (transient playbook generated by the runner).
 	if job.PlaybookID != nil {
-		relationships["playbook"] = gin.H{
-			"data": gin.H{
-				"id":   job.PlaybookID.String(),
-				"type": "ansible-playbooks",
-			},
-		}
+		r := jsonapi.ToOne(job.PlaybookID.String(), "ansible-playbooks")
+		relationships.Playbook = &r
 	}
-
 	if job.TemplateID != nil {
-		relationships["template"] = gin.H{
-			"data": gin.H{
-				"id":   job.TemplateID.String(),
-				"type": "ansible-job-templates",
-			},
-		}
+		r := jsonapi.ToOne(job.TemplateID.String(), "ansible-job-templates")
+		relationships.Template = &r
 	}
-
 	// The job's own credential set, as snapshotted at launch. Preloaded by the
 	// job repository; an empty set simply omits the relationship.
 	if len(job.Credentials) > 0 {
-		refs := make([]gin.H, 0, len(job.Credentials))
+		refs := make([]jsonapi.ResourceID, 0, len(job.Credentials))
 		for _, cred := range job.Credentials {
-			refs = append(refs, gin.H{"id": cred.ID.String(), "type": "ansible-credentials"})
+			refs = append(refs, jsonapi.ResourceID{ID: cred.ID.String(), Type: "ansible-credentials"})
 		}
-		relationships["credentials"] = gin.H{"data": refs}
+		relationships.Credentials = &jsonapi.ManyRelationship{Data: refs}
 	}
-
 	if job.CreatedBy != nil {
-		relationships["created-by"] = gin.H{
-			"data": gin.H{
-				"id":   job.CreatedBy.String(),
-				"type": "users",
-			},
-		}
+		r := jsonapi.ToOne(job.CreatedBy.String(), "users")
+		relationships.CreatedBy = &r
 	}
-
 	if job.AgentPoolID != nil {
-		relationships["agent-pool"] = gin.H{
-			"data": gin.H{
-				"id":   job.AgentPoolID.String(),
-				"type": "agent-pools",
-			},
-		}
+		r := jsonapi.ToOne(job.AgentPoolID.String(), "agent-pools")
+		relationships.AgentPool = &r
 		if job.AgentPool != nil {
-			attributes["agent-pool-name"] = job.AgentPool.Name
+			attributes.AgentPoolName = job.AgentPool.Name
 		}
 	}
-
 	if job.RunnerID != nil {
-		relationships["runner"] = gin.H{
-			"data": gin.H{
-				"id":   job.RunnerID.String(),
-				"type": "runners",
-			},
-		}
+		r := jsonapi.ToOne(job.RunnerID.String(), "runners")
+		relationships.Runner = &r
 		if job.Runner != nil {
-			attributes["runner-name"] = job.Runner.Name
+			attributes.RunnerName = job.Runner.Name
 		}
 	}
 
-	return gin.H{
-		"id":            job.ID.String(),
-		"type":          "ansible-jobs",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return jsonapi.Resource[JobAttributes]{
+		ID:            job.ID.String(),
+		Type:          "ansible-jobs",
+		Attributes:    attributes,
+		Relationships: relationships,
 	}
 }
 
 // formatJobsResponse formats multiple jobs for JSON:API response
-func formatJobsResponse(jobs []models.AnsibleJob) []gin.H {
-	result := make([]gin.H, len(jobs))
+func formatJobsResponse(jobs []models.AnsibleJob) []jsonapi.Resource[JobAttributes] {
+	result := make([]jsonapi.Resource[JobAttributes], len(jobs))
 	for i, job := range jobs {
 		result[i] = formatJobResponse(&job)
 	}
@@ -1451,40 +1051,33 @@ func formatJobsResponse(jobs []models.AnsibleJob) []gin.H {
 }
 
 // formatEventResponse formats an event for JSON:API response
-func formatEventResponse(event *models.AnsibleJobEvent) gin.H {
-	return gin.H{
-		"id":   event.ID.String(),
-		"type": "ansible-job-events",
-		"attributes": gin.H{
-			"counter":    event.Counter,
-			"event-type": event.Event,
-			"event-data": event.EventData,
-			"host":       event.Host,
-			"task":       event.Task,
-			"play":       event.Play,
-			"role":       event.Role,
-			"stdout":     event.Stdout,
-			"stderr":     event.Stderr,
-			"changed":    event.Changed,
-			"failed":     event.Failed,
-			"skipped":    event.Skipped,
-			"timestamp":  event.Timestamp.Format("2006-01-02T15:04:05Z"),
-			"created-at": event.CreatedAt.Format("2006-01-02T15:04:05Z"),
+func formatEventResponse(event *models.AnsibleJobEvent) jsonapi.Resource[EventAttributes] {
+	return jsonapi.Resource[EventAttributes]{
+		ID:   event.ID.String(),
+		Type: "ansible-job-events",
+		Attributes: EventAttributes{
+			Counter:   event.Counter,
+			EventType: event.Event,
+			EventData: event.EventData,
+			Host:      event.Host,
+			Task:      event.Task,
+			Play:      event.Play,
+			Role:      event.Role,
+			Stdout:    event.Stdout,
+			Stderr:    event.Stderr,
+			Changed:   event.Changed,
+			Failed:    event.Failed,
+			Skipped:   event.Skipped,
+			Timestamp: event.Timestamp.Format("2006-01-02T15:04:05Z"),
+			CreatedAt: event.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		},
-		"relationships": gin.H{
-			"job": gin.H{
-				"data": gin.H{
-					"id":   event.JobID.String(),
-					"type": "ansible-jobs",
-				},
-			},
-		},
+		Relationships: EventRelationships{Job: jsonapi.ToOne(event.JobID.String(), "ansible-jobs")},
 	}
 }
 
 // formatEventsResponse formats multiple events for JSON:API response
-func formatEventsResponse(events []models.AnsibleJobEvent, summary bool) []gin.H {
-	result := make([]gin.H, len(events))
+func formatEventsResponse(events []models.AnsibleJobEvent, summary bool) []jsonapi.Resource[EventAttributes] {
+	result := make([]jsonapi.Resource[EventAttributes], len(events))
 	for i, event := range events {
 		if summary {
 			result[i] = formatEventSummaryResponse(&event)
@@ -1503,8 +1096,11 @@ const maxSummaryMsgLen = 200
 // to draw a run (what happened, to whom, when, and how long it took) without the
 // payload that makes a fleet run expensive - stdout/stderr, gathered facts,
 // module args, and loop results all stay behind.
-func formatEventSummaryResponse(event *models.AnsibleJobEvent) gin.H {
-	summaryData := gin.H{}
+func formatEventSummaryResponse(event *models.AnsibleJobEvent) jsonapi.Resource[EventAttributes] {
+	// The projection maps below shape Ansible's OWN event payload, whose schema Stackweaver
+	// does not define - typing them as structs would invent a contract we do not own, the
+	// same reasoning as the Zitadel passthroughs. The resource shell around them is typed.
+	summaryData := models.JobExtraVars{}
 	if verb, ok := event.EventData["_event"].(string); ok {
 		summaryData["_event"] = verb
 	}
@@ -1512,7 +1108,7 @@ func formatEventSummaryResponse(event *models.AnsibleJobEvent) gin.H {
 		summaryData["_timestamp"] = ts
 	}
 	if task, ok := event.EventData["task"].(map[string]interface{}); ok {
-		slim := gin.H{}
+		slim := map[string]interface{}{}
 		for _, key := range []string{"id", "name", "path", "duration"} {
 			if v, ok := task[key]; ok {
 				slim[key] = v
@@ -1521,7 +1117,7 @@ func formatEventSummaryResponse(event *models.AnsibleJobEvent) gin.H {
 		summaryData["task"] = slim
 	}
 	if play, ok := event.EventData["play"].(map[string]interface{}); ok {
-		slim := gin.H{}
+		slim := map[string]interface{}{}
 		for _, key := range []string{"id", "name", "path", "duration"} {
 			if v, ok := play[key]; ok {
 				slim[key] = v
@@ -1535,10 +1131,10 @@ func formatEventSummaryResponse(event *models.AnsibleJobEvent) gin.H {
 		summaryData["stats"] = stats
 	}
 	if hosts, ok := event.EventData["hosts"].(map[string]interface{}); ok {
-		slimHosts := gin.H{}
+		slimHosts := map[string]interface{}{}
 		for name, raw := range hosts {
 			result, _ := raw.(map[string]interface{})
-			slim := gin.H{}
+			slim := map[string]interface{}{}
 			for _, key := range []string{"action", "changed", "failed", "skipped", "unreachable", "rc", "attempts", "skip_reason"} {
 				if v, ok := result[key]; ok {
 					slim[key] = v
@@ -1555,31 +1151,24 @@ func formatEventSummaryResponse(event *models.AnsibleJobEvent) gin.H {
 		summaryData["hosts"] = slimHosts
 	}
 
-	return gin.H{
-		"id":   event.ID.String(),
-		"type": "ansible-job-events",
-		"attributes": gin.H{
-			"counter":    event.Counter,
-			"event-type": event.Event,
-			"event-data": summaryData,
-			"host":       event.Host,
-			"task":       event.Task,
-			"play":       event.Play,
-			"role":       event.Role,
-			"changed":    event.Changed,
-			"failed":     event.Failed,
-			"skipped":    event.Skipped,
-			"timestamp":  event.Timestamp.Format("2006-01-02T15:04:05Z"),
-			"created-at": event.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			"summary":    true,
+	return jsonapi.Resource[EventAttributes]{
+		ID:   event.ID.String(),
+		Type: "ansible-job-events",
+		Attributes: EventAttributes{
+			Counter:   event.Counter,
+			EventType: event.Event,
+			EventData: summaryData,
+			Host:      event.Host,
+			Task:      event.Task,
+			Play:      event.Play,
+			Role:      event.Role,
+			Changed:   event.Changed,
+			Failed:    event.Failed,
+			Skipped:   event.Skipped,
+			Timestamp: event.Timestamp.Format("2006-01-02T15:04:05Z"),
+			CreatedAt: event.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			Summary:   true,
 		},
-		"relationships": gin.H{
-			"job": gin.H{
-				"data": gin.H{
-					"id":   event.JobID.String(),
-					"type": "ansible-jobs",
-				},
-			},
-		},
+		Relationships: EventRelationships{Job: jsonapi.ToOne(event.JobID.String(), "ansible-jobs")},
 	}
 }

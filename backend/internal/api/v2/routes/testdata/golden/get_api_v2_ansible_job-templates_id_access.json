@@ -1,0 +1,59 @@
+{
+  "method": "GET",
+  "path": "/api/v2/ansible/job-templates/:id/access",
+  "status": 200,
+  "body": {
+    "data": [
+      {
+        "attributes": {
+          "execute": true,
+          "read": true,
+          "team-name": "application-developers",
+          "write": true
+        },
+        "id": "\u003cuuid\u003e",
+        "type": "team-access"
+      },
+      {
+        "attributes": {
+          "execute": true,
+          "read": true,
+          "team-name": "owners",
+          "write": true
+        },
+        "id": "\u003cuuid\u003e",
+        "type": "team-access"
+      },
+      {
+        "attributes": {
+          "execute": true,
+          "read": true,
+          "team-name": "platform-engineering",
+          "write": true
+        },
+        "id": "\u003cuuid\u003e",
+        "type": "team-access"
+      },
+      {
+        "attributes": {
+          "execute": true,
+          "read": true,
+          "team-name": "security",
+          "write": true
+        },
+        "id": "\u003cuuid\u003e",
+        "type": "team-access"
+      }
+    ],
+    "meta": {
+      "pagination": {
+        "current-page": 1,
+        "next-page": null,
+        "page-size": 4,
+        "prev-page": null,
+        "total-count": 4,
+        "total-pages": 1
+      }
+    }
+  }
+}

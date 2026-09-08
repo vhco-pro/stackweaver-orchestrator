@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/activity"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -43,7 +44,7 @@ func NewActivityHandlerV2(
 func (h *ActivityHandlerV2) requireOrgMembership(c *gin.Context, userID, orgID uuid.UUID) bool {
 	inOrg, err := h.orgRepo.UserInOrg(userID, orgID)
 	if err != nil || !inOrg {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You must be a member of this organization"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You must be a member of this organization")
 		return false
 	}
 	return true
@@ -53,7 +54,7 @@ func (h *ActivityHandlerV2) requireOrgMembership(c *gin.Context, userID, orgID u
 func (h *ActivityHandlerV2) ListActivities(c *gin.Context) {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -100,12 +101,12 @@ func (h *ActivityHandlerV2) ListActivities(c *gin.Context) {
 	if workspaceID != nil {
 		workspace, err := h.workspaceRepo.GetByID(*workspaceID)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Workspace not found"}}})
+			jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Workspace not found")
 			return
 		}
 		project, err := h.projectRepo.GetByID(workspace.ProjectID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to resolve workspace organization"}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to resolve workspace organization")
 			return
 		}
 		if !h.requireOrgMembership(c, user.ID, project.OrganizationID) {
@@ -134,53 +135,46 @@ func (h *ActivityHandlerV2) ListActivities(c *gin.Context) {
 
 	activities, total, err := h.activityService.GetActivities(filters, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
 	// Format response
-	activitiesData := make([]gin.H, len(activities))
+	activitiesData := make([]jsonapi.Resource[ActivityAttributes], len(activities))
 	for i, act := range activities {
-		attrs := gin.H{
-			"action":        act.Action,
-			"resource_type": act.ResourceType,
-			"details":       act.Details,
-			"created_at":    act.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		attrs := ActivityAttributes{
+			Action:       act.Action,
+			ResourceType: act.ResourceType,
+			Details:      act.Details,
+			CreatedAt:    act.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		}
 
 		// Convert UUID pointers to strings (or omit if nil)
 		if act.ResourceID != nil {
-			attrs["resource_id"] = act.ResourceID.String()
+			attrs.ResourceID = act.ResourceID.String()
 		}
 		if act.UserID != nil {
-			attrs["user_id"] = act.UserID.String()
+			attrs.UserID = act.UserID.String()
 		}
 		if act.OrganizationID != nil {
-			attrs["organization_id"] = act.OrganizationID.String()
+			attrs.OrganizationID = act.OrganizationID.String()
 		}
 		if act.ProjectID != nil {
-			attrs["project_id"] = act.ProjectID.String()
+			attrs.ProjectID = act.ProjectID.String()
 		}
 		if act.WorkspaceID != nil {
-			attrs["workspace_id"] = act.WorkspaceID.String()
+			attrs.WorkspaceID = act.WorkspaceID.String()
 		}
 
-		activitiesData[i] = gin.H{
-			"id":         act.ID.String(),
-			"type":       "activity",
-			"attributes": attrs,
+		activitiesData[i] = jsonapi.Resource[ActivityAttributes]{
+			ID:         act.ID.String(),
+			Type:       "activity",
+			Attributes: attrs,
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": activitiesData,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"total":  total,
-				"limit":  limit,
-				"offset": offset,
-			},
-		},
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, activitiesData, ActivityPageMeta{
+		Pagination: ActivityPage{Total: total, Limit: limit, Offset: offset},
 	})
 }
 
@@ -188,7 +182,7 @@ func (h *ActivityHandlerV2) ListActivities(c *gin.Context) {
 func (h *ActivityHandlerV2) GetRecentActivities(c *gin.Context) {
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 
@@ -210,44 +204,42 @@ func (h *ActivityHandlerV2) GetRecentActivities(c *gin.Context) {
 
 	activities, err := h.activityService.GetRecentActivities(&user.ID, orgID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
-	activitiesData := make([]gin.H, len(activities))
+	activitiesData := make([]jsonapi.Resource[ActivityAttributes], len(activities))
 	for i, act := range activities {
-		attrs := gin.H{
-			"action":        act.Action,
-			"resource_type": act.ResourceType,
-			"details":       act.Details,
-			"created_at":    act.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		attrs := ActivityAttributes{
+			Action:       act.Action,
+			ResourceType: act.ResourceType,
+			Details:      act.Details,
+			CreatedAt:    act.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		}
 
 		// Convert UUID pointers to strings (or omit if nil)
 		if act.ResourceID != nil {
-			attrs["resource_id"] = act.ResourceID.String()
+			attrs.ResourceID = act.ResourceID.String()
 		}
 		if act.UserID != nil {
-			attrs["user_id"] = act.UserID.String()
+			attrs.UserID = act.UserID.String()
 		}
 		if act.OrganizationID != nil {
-			attrs["organization_id"] = act.OrganizationID.String()
+			attrs.OrganizationID = act.OrganizationID.String()
 		}
 		if act.ProjectID != nil {
-			attrs["project_id"] = act.ProjectID.String()
+			attrs.ProjectID = act.ProjectID.String()
 		}
 		if act.WorkspaceID != nil {
-			attrs["workspace_id"] = act.WorkspaceID.String()
+			attrs.WorkspaceID = act.WorkspaceID.String()
 		}
 
-		activitiesData[i] = gin.H{
-			"id":         act.ID.String(),
-			"type":       "activity",
-			"attributes": attrs,
+		activitiesData[i] = jsonapi.Resource[ActivityAttributes]{
+			ID:         act.ID.String(),
+			Type:       "activity",
+			Attributes: attrs,
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": activitiesData,
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, activitiesData)
 }

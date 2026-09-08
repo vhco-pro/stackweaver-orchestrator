@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/apikey"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -90,19 +91,19 @@ func (h *AgentTokenHandlerV2) resolvePool(c *gin.Context) (*models.AgentPool, bo
 
 // agentTokenResource builds the JSON:API resource for an agent token. token is the plaintext, included
 // only on create (empty on read). The description is stored as the key name.
-func agentTokenResource(key *models.APIKey, token string) gin.H {
-	attrs := gin.H{
-		"created-at":   key.CreatedAt,
-		"last-used-at": key.LastUsedAt,
-		"description":  key.Name,
+func agentTokenResource(key *models.APIKey, token string) jsonapi.Resource[AgentTokenAttributes] {
+	attrs := AgentTokenAttributes{
+		CreatedAt:   key.CreatedAt,
+		LastUsedAt:  key.LastUsedAt,
+		Description: key.Name,
 	}
 	if token != "" {
-		attrs["token"] = token
+		attrs.Token = token
 	}
-	return gin.H{
-		"id":         key.ID,
-		"type":       "authentication-tokens",
-		"attributes": attrs,
+	return jsonapi.Resource[AgentTokenAttributes]{
+		ID:         key.ID.String(),
+		Type:       "authentication-tokens",
+		Attributes: attrs,
 	}
 }
 
@@ -139,7 +140,7 @@ func (h *AgentTokenHandlerV2) Create(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": agentTokenResource(key, token)})
+	jsonapi.WriteDocument(c, http.StatusCreated, agentTokenResource(key, token))
 }
 
 // List returns a pool's agent tokens (metadata only).
@@ -159,22 +160,14 @@ func (h *AgentTokenHandlerV2) List(c *gin.Context) {
 		return
 	}
 
-	data := make([]gin.H, 0, len(keys))
+	data := make([]jsonapi.Resource[AgentTokenAttributes], 0, len(keys))
 	for _, k := range keys {
 		data = append(data, agentTokenResource(k, ""))
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": 1,
-				"prev-page":    nil,
-				"next-page":    nil,
-				"total-pages":  1,
-				"total-count":  len(keys),
-			},
-		},
-	})
+	// Not paginated: agent tokens are few and returned whole, so this reports a single page
+	// rather than omitting the block, which would leave a client unable to tell "one page" from
+	// "this endpoint does not page".
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(1, len(keys), int64(len(keys))))
 }
 
 // ReadByID returns a single agent token's metadata.
@@ -184,7 +177,7 @@ func (h *AgentTokenHandlerV2) ReadByID(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": agentTokenResource(key, "")})
+	jsonapi.WriteDocument(c, http.StatusOK, agentTokenResource(key, ""))
 }
 
 // DeleteByID revokes a single agent token.

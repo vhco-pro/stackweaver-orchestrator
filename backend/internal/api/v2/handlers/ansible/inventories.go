@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/michielvha/logger"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -211,39 +212,23 @@ func (h *InventoryHandler) List(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list inventories in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list inventories in this organization")
 		return
 	}
 
@@ -256,25 +241,11 @@ func (h *InventoryHandler) List(c *gin.Context) {
 
 	inventories, total, err := h.inventoryService.ListInventories(org.ID, perPage, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to list inventories"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list inventories")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatInventoriesResponse(inventories),
-		"meta": gin.H{
-			"pagination": gin.H{
-				"current-page": page,
-				"page-size":    perPage,
-				"total-count":  total,
-				"total-pages":  (total + int64(perPage) - 1) / int64(perPage),
-			},
-		},
-	})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatInventoriesResponse(inventories), jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // getOrCreateDefaultProject gets or creates the default project for an organization
@@ -303,49 +274,29 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Organization not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: check org-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create inventories in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create inventories in this organization")
 		return
 	}
 
 	var req CreateInventoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -365,11 +316,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 	// Constructed inventories need at least one valid input
 	if invType == models.InventoryTypeConstructed {
 		if len(req.Data.Attributes.InputInventoryIDs) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Constructed inventories need at least one input inventory"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Constructed inventories need at least one input inventory")
 			return
 		}
 	}
@@ -379,11 +326,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 	if req.Data.Relationships.VCSConnection.Data != nil {
 		vid, err := uuid.Parse(req.Data.Relationships.VCSConnection.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 			return
 		}
 		vcsConnectionID = &vid
@@ -394,21 +337,13 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 	if req.Data.Relationships.Project.Data != nil {
 		pid, err := uuid.Parse(req.Data.Relationships.Project.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		// Verify project belongs to organization
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != org.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to organization")
 			return
 		}
 		projectID = &pid
@@ -416,11 +351,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 		// Use default project
 		defaultProjectID, err := h.getOrCreateDefaultProject(org.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to get default project"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get default project")
 			return
 		}
 		projectID = defaultProjectID
@@ -440,11 +371,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 		req.Data.Attributes.InventoryPath,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -474,9 +401,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 				}
 			}
 		}
-		c.JSON(http.StatusCreated, gin.H{
-			"data": formatInventoryResponse(inventory),
-		})
+		jsonapi.WriteDocument(c, http.StatusCreated, formatInventoryResponse(inventory))
 		return
 	}
 
@@ -498,9 +423,7 @@ func (h *InventoryHandler) Create(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatInventoryResponse(inventory),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatInventoryResponse(inventory))
 }
 
 // Get retrieves an inventory by ID
@@ -509,32 +432,20 @@ func (h *InventoryHandler) Get(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	inventory, err := h.inventoryService.GetInventory(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 
 	// RBAC: check resource-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	var hasPermission bool
@@ -551,19 +462,11 @@ func (h *InventoryHandler) Get(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, inventory.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to access this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to access this inventory")
 		return
 	}
 
@@ -571,14 +474,14 @@ func (h *InventoryHandler) Get(c *gin.Context) {
 	// Constructed inventories also list their ordered inputs
 	if inventory.Type == models.InventoryTypeConstructed {
 		if inputs, err := h.inventoryRepo.ListConstructedInputs(inventory.ID); err == nil {
-			inputList := make([]gin.H, 0, len(inputs))
+			inputList := make([]ConstructedInputEntry, 0, len(inputs))
 			for i := range inputs {
-				inputList = append(inputList, gin.H{"id": inputs[i].ID.String(), "name": inputs[i].Name})
+				inputList = append(inputList, ConstructedInputEntry{ID: inputs[i].ID.String(), Name: inputs[i].Name})
 			}
-			resp["attributes"].(gin.H)["input-inventories"] = inputList
+			resp.Attributes.InputInventories = &inputList
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"data": resp})
+	jsonapi.WriteDocument(c, http.StatusOK, resp)
 }
 
 // Update updates an inventory
@@ -587,31 +490,19 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	// RBAC: fetch inventory and check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	rbacInventory, err := h.inventoryRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 	var hasPermission bool
@@ -628,29 +519,17 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, rbacInventory.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to update this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to update this inventory")
 		return
 	}
 
 	var req UpdateInventoryRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
@@ -659,11 +538,7 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 	if req.Data.Relationships.VCSConnection.Data != nil {
 		vid, err := uuid.Parse(req.Data.Relationships.VCSConnection.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid VCS connection ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid VCS connection ID")
 			return
 		}
 		vcsConnectionID = &vid
@@ -674,31 +549,19 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 	if req.Data.Relationships.Project.Data != nil {
 		pid, err := uuid.Parse(req.Data.Relationships.Project.Data.ID)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid project ID"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid project ID")
 			return
 		}
 		// Get existing inventory to verify organization
 		existingInventory, err := h.inventoryRepo.GetByID(id)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{
-				"errors": []gin.H{
-					{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 			return
 		}
 		// Verify project belongs to same organization
 		project, err := h.projectRepo.GetByID(pid)
 		if err != nil || project.OrganizationID != existingInventory.OrganizationID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Project not found or does not belong to organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Project not found or does not belong to organization")
 			return
 		}
 		projectID = &pid
@@ -717,11 +580,7 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 		req.Data.Attributes.InventoryPath,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -755,9 +614,7 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 	// Register ADO webhooks if this inventory is linked to an Azure DevOps repository
 	h.maybeRegisterADOWebhook(inventory.VCSConnectionID, inventory.VCSRepository)
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": formatInventoryResponse(inventory),
-	})
+	jsonapi.WriteDocument(c, http.StatusOK, formatInventoryResponse(inventory))
 }
 
 // setConstructedInputs validates and persists the ordered input list of a
@@ -766,57 +623,33 @@ func (h *InventoryHandler) Update(c *gin.Context) {
 // constructed (no nesting in v1).
 func (h *InventoryHandler) setConstructedInputs(c *gin.Context, orgID uuid.UUID, inventory *models.AnsibleInventory, inputIDs []string) bool {
 	if len(inputIDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Constructed inventories need at least one input inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Constructed inventories need at least one input inventory")
 		return false
 	}
 	ids := make([]uuid.UUID, 0, len(inputIDs))
 	for _, raw := range inputIDs {
 		inputID, err := uuid.Parse(raw)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Invalid input inventory ID " + raw},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid input inventory ID "+raw)
 			return false
 		}
 		input, err := h.inventoryRepo.GetByID(inputID)
 		if err != nil || input.OrganizationID != orgID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Input inventory " + raw + " not found in this organization"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Input inventory "+raw+" not found in this organization")
 			return false
 		}
 		if input.Type == models.InventoryTypeConstructed {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "Constructed inventories cannot be inputs of other constructed inventories"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Constructed inventories cannot be inputs of other constructed inventories")
 			return false
 		}
 		if input.ID == inventory.ID {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"errors": []gin.H{
-					{"status": "400", "title": "Bad Request", "detail": "An inventory cannot be its own input"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "An inventory cannot be its own input")
 			return false
 		}
 		ids = append(ids, inputID)
 	}
 	if err := h.inventoryRepo.SetConstructedInputs(inventory.ID, ids); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to save input inventories"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to save input inventories")
 		return false
 	}
 	return true
@@ -828,31 +661,19 @@ func (h *InventoryHandler) Delete(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	// RBAC: fetch inventory and check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	inventoryForRBAC, err := h.inventoryRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 	var hasPermission bool
@@ -869,19 +690,11 @@ func (h *InventoryHandler) Delete(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, inventoryForRBAC.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to delete this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to delete this inventory")
 		return
 	}
 
@@ -891,27 +704,15 @@ func (h *InventoryHandler) Delete(c *gin.Context) {
 	if c.Query("force") == "true" {
 		canManage, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, inventoryForRBAC.OrganizationID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 			return
 		}
 		if !canManage {
-			c.JSON(http.StatusForbidden, gin.H{
-				"errors": []gin.H{
-					{"status": "403", "title": "Forbidden", "detail": "Force delete requires organization-level Ansible management permission"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "Force delete requires organization-level Ansible management permission")
 			return
 		}
 		if err := h.inventoryService.ForceDeleteInventory(id); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 			return
 		}
 		c.Status(http.StatusNoContent)
@@ -922,29 +723,17 @@ func (h *InventoryHandler) Delete(c *gin.Context) {
 		// Check if it's a dependency error (contains "cannot delete" or "referenced")
 		errStr := err.Error()
 		if strings.Contains(errStr, "cannot delete") || strings.Contains(errStr, "referenced") {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{"status": "409", "title": "Conflict", "detail": err.Error()},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", err.Error())
 			return
 		}
 
 		// Check for foreign key constraint violation (fallback)
 		if strings.Contains(errStr, "violates foreign key constraint") {
-			c.JSON(http.StatusConflict, gin.H{
-				"errors": []gin.H{
-					{"status": "409", "title": "Conflict", "detail": "Cannot delete inventory: it is referenced by one or more job templates, jobs, or inventory sources. Remove the inventory from those resources first."},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusConflict, "Conflict", "Cannot delete inventory: it is referenced by one or more job templates, jobs, or inventory sources. Remove the inventory from those resources first.")
 			return
 		}
 
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -957,31 +746,19 @@ func (h *InventoryHandler) GetInventoryINI(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	// RBAC: fetch inventory and check resource-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	inventory, err := h.inventoryRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 	var hasPermission bool
@@ -998,29 +775,17 @@ func (h *InventoryHandler) GetInventoryINI(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, inventory.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to access this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to access this inventory")
 		return
 	}
 
 	content, err := h.inventoryService.GenerateInventoryINI(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -1034,31 +799,19 @@ func (h *InventoryHandler) GetInventoryJSON(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	// RBAC: fetch inventory and check resource-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	inventory, err := h.inventoryRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 	var hasPermission bool
@@ -1075,29 +828,17 @@ func (h *InventoryHandler) GetInventoryJSON(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, inventory.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to access this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to access this inventory")
 		return
 	}
 
 	content, err := h.inventoryService.GenerateInventoryJSON(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": err.Error()},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", err.Error())
 		return
 	}
 
@@ -1111,32 +852,20 @@ func (h *InventoryHandler) SyncInventory(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Invalid inventory ID"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Invalid inventory ID")
 		return
 	}
 
 	inventory, err := h.inventoryRepo.GetByID(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []gin.H{
-				{"status": "404", "title": "Not Found", "detail": "Inventory not found"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Inventory not found")
 		return
 	}
 
 	// RBAC: check resource-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	var hasPermission bool
@@ -1153,19 +882,11 @@ func (h *InventoryHandler) SyncInventory(c *gin.Context) {
 		hasPermission, err = h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, inventory.OrganizationID)
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to sync this inventory"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to sync this inventory")
 		return
 	}
 
@@ -1173,11 +894,7 @@ func (h *InventoryHandler) SyncInventory(c *gin.Context) {
 	// their VCS configuration.
 	if inventory.Type != models.InventoryTypeConstructed &&
 		(inventory.VCSConnectionID == nil || inventory.VCSRepository == "" || inventory.InventoryPath == "") {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []gin.H{
-				{"status": "400", "title": "Bad Request", "detail": "Inventory has no VCS connection configured"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "Inventory has no VCS connection configured")
 		return
 	}
 
@@ -1185,11 +902,7 @@ func (h *InventoryHandler) SyncInventory(c *gin.Context) {
 	inventory.LastSyncStatus = "syncing"
 	inventory.LastSyncError = ""
 	if err := h.inventoryRepo.Update(inventory); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to update sync status"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update sync status")
 		return
 	}
 
@@ -1205,84 +918,63 @@ func (h *InventoryHandler) SyncInventory(c *gin.Context) {
 				logger.Warnf("Failed to update inventory after sync queue error: %v", updateErr)
 			}
 
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"errors": []gin.H{
-					{"status": "500", "title": "Internal Server Error", "detail": "Failed to queue sync job"},
-				},
-			})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to queue sync job")
 			return
 		}
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"data": formatInventoryResponse(inventory),
-	})
+	jsonapi.WriteDocument(c, http.StatusAccepted, formatInventoryResponse(inventory))
 }
 
 // formatInventoryResponse formats an inventory for JSON:API response
-func formatInventoryResponse(inv *models.AnsibleInventory) gin.H {
-	attributes := gin.H{
-		"name":                       inv.Name,
-		"description":                inv.Description,
-		"inventory-type":             inv.Type,
-		"source":                     inv.Source,
-		"variables":                  inv.Variables,
-		"last-sync-at":               inv.LastSyncAt,
-		"last-sync-status":           inv.LastSyncStatus,
-		"last-sync-error":            inv.LastSyncError,
-		"last-sync-hosts-discovered": inv.LastSyncHostsDiscovered,
-		"last-sync-log":              inv.LastSyncLog,
-		"source-vars":                inv.SourceVars,
-		"constructed-limit":          inv.ConstructedLimit,
-		"constructed-cache-timeout":  inv.ConstructedCacheTimeout,
-		"created-at":                 inv.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":                 inv.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+func formatInventoryResponse(inv *models.AnsibleInventory) *jsonapi.Resource[InventoryAttributes] {
+	attributes := InventoryAttributes{
+		Name:                    inv.Name,
+		Description:             inv.Description,
+		InventoryType:           inv.Type,
+		Source:                  inv.Source,
+		Variables:               inv.Variables,
+		LastSyncAt:              inv.LastSyncAt,
+		LastSyncStatus:          inv.LastSyncStatus,
+		LastSyncError:           inv.LastSyncError,
+		LastSyncHostsDiscovered: inv.LastSyncHostsDiscovered,
+		LastSyncLog:             inv.LastSyncLog,
+		SourceVars:              inv.SourceVars,
+		ConstructedLimit:        inv.ConstructedLimit,
+		ConstructedCacheTimeout: inv.ConstructedCacheTimeout,
+		CreatedAt:               inv.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:               inv.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	// Add VCS fields if present
 	if inv.VCSConnectionID != nil {
-		attributes["vcs_connection_id"] = inv.VCSConnectionID.String()
+		attributes.VCSConnectionID = inv.VCSConnectionID.String()
 	}
-	if inv.VCSRepository != "" {
-		attributes["vcs_repository"] = inv.VCSRepository
-	}
-	if inv.VCSBranch != "" {
-		attributes["vcs_branch"] = inv.VCSBranch
-	}
-	if inv.InventoryPath != "" {
-		attributes["inventory_path"] = inv.InventoryPath
-	}
+	attributes.VCSRepository = inv.VCSRepository
+	attributes.VCSBranch = inv.VCSBranch
+	attributes.InventoryPath = inv.InventoryPath
 
-	relationships := gin.H{
-		"organization": gin.H{
-			"data": gin.H{
-				"id":   inv.OrganizationID.String(),
-				"type": "organizations",
-			},
-		},
+	relationships := InventoryRelationships{
+		Organization: jsonapi.ToOne(inv.OrganizationID.String(), "organizations"),
 	}
 
 	// Add VCS connection relationship if present
 	if inv.VCSConnectionID != nil {
-		relationships["vcs_connection"] = gin.H{
-			"data": gin.H{
-				"id":   inv.VCSConnectionID.String(),
-				"type": "vcs-connections",
-			},
-		}
+		r := jsonapi.ToOne(inv.VCSConnectionID.String(), "vcs-connections")
+		relationships.VCSConnection = &r
 	}
 
-	return gin.H{
-		"id":            inv.ID.String(),
-		"type":          "ansible-inventories",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return &jsonapi.Resource[InventoryAttributes]{
+		ID:            inv.ID.String(),
+		Type:          "ansible-inventories",
+		Attributes:    attributes,
+		Relationships: relationships,
 	}
 }
 
 // formatInventoriesResponse formats multiple inventories for JSON:API response
-func formatInventoriesResponse(inventories []models.AnsibleInventory) []gin.H {
-	result := make([]gin.H, len(inventories))
+func formatInventoriesResponse(inventories []models.AnsibleInventory) []*jsonapi.Resource[InventoryAttributes] {
+	result := make([]*jsonapi.Resource[InventoryAttributes], len(inventories))
 	for i, inv := range inventories {
 		result[i] = formatInventoryResponse(&inv)
 	}

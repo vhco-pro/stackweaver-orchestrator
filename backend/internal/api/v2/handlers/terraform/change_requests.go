@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -46,7 +47,7 @@ func NewChangeRequestHandlerV2(
 }
 
 func crError(c *gin.Context, status int, title, detail string) {
-	c.JSON(status, gin.H{"errors": []gin.H{{"status": strconv.Itoa(status), "title": title, "detail": detail}}})
+	jsonapi.WriteError(c, status, title, detail)
 }
 
 // bulkActionRequest is the JSON:API body of POST /organizations/:name/explorer/bulk-actions. Note the
@@ -71,31 +72,31 @@ type bulkActionRequest struct {
 // request is open, matching TFE. workspace-name and created-by are Stackweaver extras (TFE exposes
 // neither); they let the UI render a filer and a workspace label without an extra round trip, and
 // additive attributes are ignored by TFE clients.
-func formatChangeRequest(cr *models.ChangeRequest) gin.H {
-	attrs := gin.H{
-		"subject":     cr.Subject,
-		"message":     cr.Message,
-		"archived-by": nil,
-		"archived-at": nil,
-		"created-by":  cr.CreatedBy.String(),
-		"created-at":  cr.CreatedAt.Format(time.RFC3339),
-		"updated-at":  cr.UpdatedAt.Format(time.RFC3339),
+func formatChangeRequest(cr *models.ChangeRequest) jsonapi.Resource[ChangeRequestAttributes] {
+	attrs := ChangeRequestAttributes{
+		Subject:   cr.Subject,
+		Message:   cr.Message,
+		CreatedBy: cr.CreatedBy.String(),
+		CreatedAt: cr.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: cr.UpdatedAt.Format(time.RFC3339),
 	}
 	if cr.ArchivedBy != nil {
-		attrs["archived-by"] = cr.ArchivedBy.String()
+		v := cr.ArchivedBy.String()
+		attrs.ArchivedBy = &v
 	}
 	if cr.ArchivedAt != nil {
-		attrs["archived-at"] = cr.ArchivedAt.Format(time.RFC3339)
+		v := cr.ArchivedAt.Format(time.RFC3339)
+		attrs.ArchivedAt = &v
 	}
 	if cr.Workspace != nil {
-		attrs["workspace-name"] = cr.Workspace.Name
+		attrs.WorkspaceName = cr.Workspace.Name
 	}
-	return gin.H{
-		"id":         cr.ID,
-		"type":       "workspace_change_requests",
-		"attributes": attrs,
-		"relationships": gin.H{
-			"workspace": gin.H{"data": gin.H{"id": cr.WorkspaceID, "type": "workspaces"}},
+	return jsonapi.Resource[ChangeRequestAttributes]{
+		ID:         cr.ID,
+		Type:       "workspace_change_requests",
+		Attributes: attrs,
+		Relationships: WorkspaceOnlyRelationshipsWS{
+			Workspace: jsonapi.ToOne(cr.WorkspaceID, "workspaces"),
 		},
 	}
 }
@@ -168,10 +169,6 @@ func paginate(c *gin.Context) (page, pageSize, offset int) {
 	return page, pageSize, (page - 1) * pageSize
 }
 
-func paginationMeta(page, pageSize int, total int64) gin.H {
-	return gin.H{"pagination": gin.H{"current-page": page, "page-size": pageSize, "total-count": total}}
-}
-
 // BulkActions handles POST /organizations/:name/explorer/bulk-actions. This is TFE's only documented
 // way to create change requests: one subject/message filed against many target workspaces at once.
 func (h *ChangeRequestHandlerV2) BulkActions(c *gin.Context) {
@@ -238,15 +235,15 @@ func (h *ChangeRequestHandlerV2) BulkActions(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": gin.H{
-		"type": "bulk_actions",
-		"attributes": gin.H{
-			"organization_id": org.ID.String(),
-			"action_type":     a.ActionType,
-			"action_inputs":   gin.H{"subject": a.ActionInputs.Subject, "message": a.ActionInputs.Message},
-			"created_by":      gin.H{"id": user.ID.String(), "type": "users"},
+	jsonapi.WriteDocument(c, http.StatusCreated, BulkActionDocument{
+		Type: "bulk_actions",
+		Attributes: BulkActionAttributes{
+			OrganizationID: org.ID.String(),
+			ActionType:     a.ActionType,
+			ActionInputs:   BulkActionInputs{Subject: a.ActionInputs.Subject, Message: a.ActionInputs.Message},
+			CreatedBy:      jsonapi.ResourceID{ID: user.ID.String(), Type: "users"},
 		},
-	}})
+	})
 }
 
 // ListByWorkspace handles GET /workspaces/:id/change-requests. Archived requests are excluded unless
@@ -264,11 +261,11 @@ func (h *ChangeRequestHandlerV2) ListByWorkspace(c *gin.Context) {
 		crError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list change requests")
 		return
 	}
-	data := make([]gin.H, 0, len(crs))
+	data := make([]jsonapi.Resource[ChangeRequestAttributes], 0, len(crs))
 	for i := range crs {
 		data = append(data, formatChangeRequest(&crs[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "meta": paginationMeta(page, pageSize, total)})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, pageSize, total))
 }
 
 // ListByOrganization handles GET /organizations/:name/change-requests, the org-wide triage view. Not a
@@ -285,11 +282,11 @@ func (h *ChangeRequestHandlerV2) ListByOrganization(c *gin.Context) {
 		crError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to list change requests")
 		return
 	}
-	data := make([]gin.H, 0, len(crs))
+	data := make([]jsonapi.Resource[ChangeRequestAttributes], 0, len(crs))
 	for i := range crs {
 		data = append(data, formatChangeRequest(&crs[i]))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": data, "meta": paginationMeta(page, pageSize, total)})
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, data, jsonapi.NewPaginationMeta(page, pageSize, total))
 }
 
 // loadForCaller loads a change request by id and authorizes the caller against its workspace.
@@ -311,7 +308,7 @@ func (h *ChangeRequestHandlerV2) Read(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatChangeRequest(cr)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatChangeRequest(cr))
 }
 
 // Archive handles PATCH (and POST, which TFE's docs also describe) /workspaces/change-requests/:id.
@@ -330,7 +327,7 @@ func (h *ChangeRequestHandlerV2) Archive(c *gin.Context) {
 	}
 	if cr.Archived() {
 		// Already archived: return it as-is rather than overwriting the original archiver.
-		c.JSON(http.StatusOK, gin.H{"data": formatChangeRequest(cr)})
+		jsonapi.WriteDocument(c, http.StatusOK, formatChangeRequest(cr))
 		return
 	}
 	if err := h.repo.Archive(cr.ID, user.ID); err != nil {
@@ -342,7 +339,7 @@ func (h *ChangeRequestHandlerV2) Archive(c *gin.Context) {
 		crError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to reload change request")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatChangeRequest(updated)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatChangeRequest(updated))
 }
 
 // Delete handles DELETE /workspaces/change-requests/:id. Not a TFE endpoint (TFE only archives).

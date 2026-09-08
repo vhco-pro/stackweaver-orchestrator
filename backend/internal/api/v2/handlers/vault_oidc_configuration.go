@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
 	"github.com/michielvha/stackweaver/core/models"
@@ -72,29 +73,27 @@ type UpdateVaultOIDCConfigRequest struct {
 }
 
 // formatVaultOIDCConfigResponse formats a Vault OIDC configuration as a JSON:API response.
-func formatVaultOIDCConfigResponse(config *models.VaultOIDCConfiguration) gin.H {
+func formatVaultOIDCConfigResponse(config *models.VaultOIDCConfiguration) jsonapi.Resource[VaultOIDCConfigAttributes] {
 	orgName := ""
 	if config.Organization != nil {
 		orgName = config.Organization.Name
 	}
 
-	return gin.H{
-		"id":   config.ID,
-		"type": vaultOIDCConfigType,
-		"attributes": gin.H{
-			"address":        config.Address,
-			"role":           config.RoleName,
-			"namespace":      config.Namespace,
-			"auth-path":      config.JWTAuthPath,
-			"encoded-cacert": config.TLSCACertificate,
+	return jsonapi.Resource[VaultOIDCConfigAttributes]{
+		ID:   config.ID,
+		Type: vaultOIDCConfigType,
+		Attributes: VaultOIDCConfigAttributes{
+			Address:       config.Address,
+			Role:          config.RoleName,
+			Namespace:     config.Namespace,
+			AuthPath:      config.JWTAuthPath,
+			EncodedCACert: config.TLSCACertificate,
 		},
-		"relationships": gin.H{
-			"organization": gin.H{
-				"data": gin.H{"id": orgName, "type": "organizations"},
-			},
+		Relationships: WorkspaceOnlyRelationshipsNamed{
+			Organization: jsonapi.ToOne(orgName, "organizations"),
 		},
-		"links": gin.H{
-			"self": "/api/v2/oidc-configurations/" + config.ID,
+		Links: jsonapi.SelfLink{
+			Self: "/api/v2/oidc-configurations/" + config.ID,
 		},
 	}
 }
@@ -105,39 +104,39 @@ func (h *VaultOIDCConfigurationHandlerV2) Create(c *gin.Context) {
 	orgName := c.Param("name")
 	org, err := h.orgRepo.GetByName(orgName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "Organization not found"}}})
+		jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "Organization not found")
 		return
 	}
 
 	// RBAC: user must be able to manage the organization's VCS/OIDC settings
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	ok, err := h.rbacService.CheckOrgManageVCSSettings(c.Request.Context(), user.ID, org.ID)
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to manage OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to manage OIDC configurations")
 		return
 	}
 
 	var req CreateVaultOIDCConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	if req.Data.Type != vaultOIDCConfigType {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "data.type must be '" + vaultOIDCConfigType + "'"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "data.type must be '"+vaultOIDCConfigType+"'")
 		return
 	}
 
 	if req.Data.Attributes.Address == "" {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Unprocessable Entity", "detail": "address is required"}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Unprocessable Entity", "address is required")
 		return
 	}
 	if req.Data.Attributes.RoleName == "" {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"errors": []gin.H{{"status": "422", "title": "Unprocessable Entity", "detail": "role is required"}}})
+		jsonapi.WriteError(c, http.StatusUnprocessableEntity, "Unprocessable Entity", "role is required")
 		return
 	}
 
@@ -151,18 +150,18 @@ func (h *VaultOIDCConfigurationHandlerV2) Create(c *gin.Context) {
 	}
 
 	if err := h.configRepo.Create(config); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to create Vault OIDC configuration"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to create Vault OIDC configuration")
 		return
 	}
 
 	// Reload with organization preloaded
 	config, err = h.configRepo.GetByID(config.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to reload Vault OIDC configuration"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to reload Vault OIDC configuration")
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": formatVaultOIDCConfigResponse(config)})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatVaultOIDCConfigResponse(config))
 }
 
 // Read returns a Vault OIDC configuration by ID.
@@ -172,7 +171,7 @@ func (h *VaultOIDCConfigurationHandlerV2) Read(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": formatVaultOIDCConfigResponse(config)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatVaultOIDCConfigResponse(config))
 }
 
 // Update updates a Vault OIDC configuration (partial update).
@@ -185,12 +184,12 @@ func (h *VaultOIDCConfigurationHandlerV2) Update(c *gin.Context) {
 
 	var req UpdateVaultOIDCConfigRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": err.Error()}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", err.Error())
 		return
 	}
 
 	if req.Data.Type != vaultOIDCConfigType {
-		c.JSON(http.StatusBadRequest, gin.H{"errors": []gin.H{{"status": "400", "title": "Bad Request", "detail": "data.type must be '" + vaultOIDCConfigType + "'"}}})
+		jsonapi.WriteError(c, http.StatusBadRequest, "Bad Request", "data.type must be '"+vaultOIDCConfigType+"'")
 		return
 	}
 
@@ -214,13 +213,13 @@ func (h *VaultOIDCConfigurationHandlerV2) Update(c *gin.Context) {
 	if len(updates) > 0 {
 		updated, err := h.configRepo.Update(config.ID, updates)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to update OIDC configuration"}}})
+			jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to update OIDC configuration")
 			return
 		}
 		config = updated
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": formatVaultOIDCConfigResponse(config)})
+	jsonapi.WriteDocument(c, http.StatusOK, formatVaultOIDCConfigResponse(config))
 }
 
 // Delete deletes a Vault OIDC configuration.
@@ -231,7 +230,7 @@ func (h *VaultOIDCConfigurationHandlerV2) Delete(c *gin.Context) {
 		return
 	}
 	if err := h.configRepo.Delete(config.ID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to delete OIDC configuration"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to delete OIDC configuration")
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -243,21 +242,21 @@ func (h *VaultOIDCConfigurationHandlerV2) loadAuthorized(c *gin.Context) (*model
 	config, err := h.configRepo.GetByID(c.Param("id"))
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"errors": []gin.H{{"status": "404", "title": "Not Found", "detail": "OIDC configuration not found"}}})
+			jsonapi.WriteError(c, http.StatusNotFound, "Not Found", "OIDC configuration not found")
 			return nil, false
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": []gin.H{{"status": "500", "title": "Internal Server Error", "detail": "Failed to get OIDC configuration"}}})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to get OIDC configuration")
 		return nil, false
 	}
 
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"errors": []gin.H{{"status": "401", "title": "Unauthorized", "detail": "Authentication required"}}})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return nil, false
 	}
 	ok, err := h.rbacService.CheckOrgManageVCSSettings(c.Request.Context(), user.ID, config.OrganizationID)
 	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"errors": []gin.H{{"status": "403", "title": "Forbidden", "detail": "You do not have permission to manage OIDC configurations"}}})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to manage OIDC configurations")
 		return nil, false
 	}
 	return config, true
@@ -265,12 +264,12 @@ func (h *VaultOIDCConfigurationHandlerV2) loadAuthorized(c *gin.Context) (*model
 
 // listData returns the org's Vault OIDC configs formatted as JSON:API resource objects (used by the
 // dispatcher's merged List).
-func (h *VaultOIDCConfigurationHandlerV2) listData(orgID uuid.UUID) ([]gin.H, error) {
+func (h *VaultOIDCConfigurationHandlerV2) listData(orgID uuid.UUID) ([]jsonapi.Resource[VaultOIDCConfigAttributes], error) {
 	configs, err := h.configRepo.GetByOrganization(orgID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]gin.H, 0, len(configs))
+	out := make([]jsonapi.Resource[VaultOIDCConfigAttributes], 0, len(configs))
 	for i := range configs {
 		out = append(out, formatVaultOIDCConfigResponse(&configs[i]))
 	}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/response"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/rbac"
@@ -75,7 +76,7 @@ type UpdateScheduleRequest struct {
 // @Success 201 {object} models.AnsibleSchedule
 // @Failure 400 {object} response.ErrorResponse
 // @Failure 500 {object} response.ErrorResponse
-// @Router /api/v2/ansible/schedules [post]
+// @Router /api/v2/organizations/{name}/ansible/schedules [post]
 func (h *ScheduleHandler) Create(c *gin.Context) {
 	var req CreateScheduleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -104,28 +105,16 @@ func (h *ScheduleHandler) Create(c *gin.Context) {
 	// RBAC: check org-level write permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to create schedules in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to create schedules in this organization")
 		return
 	}
 
@@ -234,105 +223,73 @@ func (h *ScheduleHandler) Create(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
-		"data": formatScheduleResponse(schedule),
-	})
+	jsonapi.WriteDocument(c, http.StatusCreated, formatScheduleResponse(schedule))
 }
 
 // formatScheduleResponse formats a schedule for JSON:API response
-func formatScheduleResponse(schedule *models.AnsibleSchedule) gin.H {
+func formatScheduleResponse(schedule *models.AnsibleSchedule) jsonapi.Resource[ScheduleAttributes] {
 	// Ensure config is not nil for response
 	config := schedule.Config
 	if config == nil {
 		config = make(models.ScheduleConfig)
 	}
 
-	attributes := gin.H{
-		"name":            schedule.Name,
-		"description":     schedule.Description,
-		"schedule-type":   schedule.Type,
-		"status":          schedule.Status,
-		"cron-expression": schedule.CronExpression,
-		"timezone":        schedule.Timezone,
-		"config":          config,
-		"created-at":      schedule.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		"updated-at":      schedule.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+	attributes := ScheduleAttributes{
+		Name:           schedule.Name,
+		Description:    schedule.Description,
+		ScheduleType:   schedule.Type,
+		Status:         schedule.Status,
+		CronExpression: schedule.CronExpression,
+		Timezone:       schedule.Timezone,
+		Config:         config,
+		CreatedAt:      schedule.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:      schedule.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		LastRunStatus:  schedule.LastRunStatus,
+		RunCount:       schedule.RunCount,
 	}
 
 	if schedule.StartDateTime != nil {
-		attributes["start-date-time"] = schedule.StartDateTime.Format(time.RFC3339)
+		attributes.StartDateTime = schedule.StartDateTime.Format(time.RFC3339)
 	}
 	if schedule.EndDateTime != nil {
-		attributes["end-date-time"] = schedule.EndDateTime.Format(time.RFC3339)
+		attributes.EndDateTime = schedule.EndDateTime.Format(time.RFC3339)
 	}
 	if schedule.NextRunAt != nil {
-		attributes["next-run-at"] = schedule.NextRunAt.Format(time.RFC3339)
+		attributes.NextRunAt = schedule.NextRunAt.Format(time.RFC3339)
 	}
 	if schedule.LastRunAt != nil {
-		attributes["last-run-at"] = schedule.LastRunAt.Format(time.RFC3339)
-	}
-	if schedule.LastRunStatus != "" {
-		attributes["last-run-status"] = schedule.LastRunStatus
-	}
-	if schedule.RunCount > 0 {
-		attributes["run-count"] = schedule.RunCount
+		attributes.LastRunAt = schedule.LastRunAt.Format(time.RFC3339)
 	}
 
-	relationships := gin.H{
-		"organization": gin.H{
-			"data": gin.H{
-				"id":   schedule.OrganizationID.String(),
-				"type": "organizations",
-			},
-		},
+	relationships := ScheduleRelationships{
+		Organization: jsonapi.ToOne(schedule.OrganizationID.String(), "organizations"),
 	}
-
 	if schedule.JobTemplateID != nil {
-		relationships["job-template"] = gin.H{
-			"data": gin.H{
-				"id":   schedule.JobTemplateID.String(),
-				"type": "ansible-job-templates",
-			},
-		}
+		r := jsonapi.ToOne(schedule.JobTemplateID.String(), "ansible-job-templates")
+		relationships.JobTemplate = &r
 	}
 	if schedule.InventorySourceID != nil {
-		relationships["inventory-source"] = gin.H{
-			"data": gin.H{
-				"id":   schedule.InventorySourceID.String(),
-				"type": "ansible-inventory-sources",
-			},
-		}
+		r := jsonapi.ToOne(schedule.InventorySourceID.String(), "ansible-inventory-sources")
+		relationships.InventorySource = &r
 	}
 	if schedule.PlaybookID != nil {
-		relationships["playbook"] = gin.H{
-			"data": gin.H{
-				"id":   schedule.PlaybookID.String(),
-				"type": "ansible-playbooks",
-			},
-		}
+		r := jsonapi.ToOne(schedule.PlaybookID.String(), "ansible-playbooks")
+		relationships.Playbook = &r
 	}
 	if schedule.LastJobID != nil {
-		relationships["last-job"] = gin.H{
-			"data": gin.H{
-				"id":   schedule.LastJobID.String(),
-				"type": "ansible-jobs",
-			},
-		}
+		r := jsonapi.ToOne(schedule.LastJobID.String(), "ansible-jobs")
+		relationships.LastJob = &r
 	}
 	if schedule.CreatedBy != nil {
-		relationships["created-by"] = gin.H{
-			"data": gin.H{
-				"id":   schedule.CreatedBy.String(),
-				"type": "users",
-			},
-		}
+		r := jsonapi.ToOne(schedule.CreatedBy.String(), "users")
+		relationships.CreatedBy = &r
 	}
 
-	return gin.H{
-		"id":            schedule.ID.String(),
-		"type":          "schedules",
-		"attributes":    attributes,
-		"relationships": relationships,
+	return jsonapi.Resource[ScheduleAttributes]{
+		ID:            schedule.ID.String(),
+		Type:          "schedules",
+		Attributes:    attributes,
+		Relationships: relationships,
 	}
 }
 
@@ -362,99 +319,20 @@ func (h *ScheduleHandler) Get(c *gin.Context) {
 	// RBAC: check org-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, schedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to view this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to view this schedule")
 		return
 	}
 
 	c.JSON(http.StatusOK, schedule)
-}
-
-// List lists schedules for an organization
-// @Summary List schedules
-// @Description List all schedules for the current organization
-// @Tags Ansible Schedules
-// @Produce json
-// @Param limit query int false "Limit" default(20)
-// @Param offset query int false "Offset" default(0)
-// @Success 200 {object} response.PaginatedResponse
-// @Failure 400 {object} response.ErrorResponse
-// @Router /api/v2/ansible/schedules [get]
-func (h *ScheduleHandler) List(c *gin.Context) {
-	// Get organization ID from context
-	orgIDStr, exists := c.Get("organization_id")
-	if !exists {
-		response.BadRequest(c, "Organization ID not found")
-		return
-	}
-	orgID, err := uuid.Parse(orgIDStr.(string))
-	if err != nil {
-		response.BadRequest(c, "Invalid organization ID")
-		return
-	}
-
-	// RBAC: check org-level read permission
-	user, err := h.authService.GetUserFromContext(c)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
-		return
-	}
-	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, orgID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
-		return
-	}
-	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list schedules in this organization"},
-			},
-		})
-		return
-	}
-
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-
-	schedules, total, err := h.schedulerService.ListSchedules(orgID, limit, offset)
-	if err != nil {
-		response.InternalError(c, err.Error())
-		return
-	}
-
-	formatted := make([]gin.H, 0, len(schedules))
-	for i := range schedules {
-		formatted = append(formatted, formatScheduleResponse(&schedules[i]))
-	}
-	response.Paginated(c, formatted, total, limit, offset)
 }
 
 // Update updates a schedule
@@ -484,28 +362,16 @@ func (h *ScheduleHandler) Update(c *gin.Context) {
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, existingSchedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to update this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to update this schedule")
 		return
 	}
 
@@ -548,28 +414,16 @@ func (h *ScheduleHandler) Delete(c *gin.Context) {
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, schedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to delete this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to delete this schedule")
 		return
 	}
 
@@ -586,10 +440,10 @@ func (h *ScheduleHandler) Delete(c *gin.Context) {
 // @Description Enable a schedule
 // @Tags Ansible Schedules
 // @Param id path string true "Schedule ID"
-// @Success 200 {object} gin.H
+// @Success 200 {object} response.MessageResponse
 // @Failure 400 {object} response.ErrorResponse
 // @Failure 500 {object} response.ErrorResponse
-// @Router /api/v2/ansible/schedules/{id}/enable [post]
+// @Router /api/v2/ansible/schedules/{schedule_id}/actions/enable [post]
 func (h *ScheduleHandler) Enable(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("schedule_id"))
 	if err != nil {
@@ -605,28 +459,16 @@ func (h *ScheduleHandler) Enable(c *gin.Context) {
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, schedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to enable this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to enable this schedule")
 		return
 	}
 
@@ -635,7 +477,7 @@ func (h *ScheduleHandler) Enable(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Schedule enabled"})
+	response.Message(c, http.StatusOK, "Schedule enabled")
 }
 
 // Disable disables a schedule
@@ -643,10 +485,10 @@ func (h *ScheduleHandler) Enable(c *gin.Context) {
 // @Description Disable a schedule
 // @Tags Ansible Schedules
 // @Param id path string true "Schedule ID"
-// @Success 200 {object} gin.H
+// @Success 200 {object} response.MessageResponse
 // @Failure 400 {object} response.ErrorResponse
 // @Failure 500 {object} response.ErrorResponse
-// @Router /api/v2/ansible/schedules/{id}/disable [post]
+// @Router /api/v2/ansible/schedules/{schedule_id}/actions/disable [post]
 func (h *ScheduleHandler) Disable(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("schedule_id"))
 	if err != nil {
@@ -662,28 +504,16 @@ func (h *ScheduleHandler) Disable(c *gin.Context) {
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, schedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to disable this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to disable this schedule")
 		return
 	}
 
@@ -692,7 +522,7 @@ func (h *ScheduleHandler) Disable(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Schedule disabled"})
+	response.Message(c, http.StatusOK, "Schedule disabled")
 }
 
 // ValidateCron validates a cron expression and returns the next run time
@@ -704,7 +534,6 @@ func (h *ScheduleHandler) Disable(c *gin.Context) {
 // @Param request body ValidateCronRequest true "Cron expression"
 // @Success 200 {object} ValidateCronResponse
 // @Failure 400 {object} response.ErrorResponse
-// @Router /api/v2/ansible/schedules/validate-cron [post]
 func (h *ScheduleHandler) ValidateCron(c *gin.Context) {
 	var req ValidateCronRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -756,7 +585,6 @@ type ValidateCronResponse struct {
 // @Tags Ansible Schedules
 // @Produce json
 // @Success 200 {object} map[string]string
-// @Router /api/v2/ansible/schedules/cron-presets [get]
 func (h *ScheduleHandler) GetCronPresets(c *gin.Context) {
 	c.JSON(http.StatusOK, models.CronPresets)
 }
@@ -767,9 +595,9 @@ func (h *ScheduleHandler) GetCronPresets(c *gin.Context) {
 // @Tags Ansible Schedules
 // @Produce json
 // @Param name path string true "Organization name"
-// @Param limit query int false "Limit" default(20)
-// @Param offset query int false "Offset" default(0)
-// @Success 200 {object} response.PaginatedResponse
+// @Param page[number] query int false "Page number" default(1)
+// @Param page[size] query int false "Page size" default(20)
+// @Success 200 {object} jsonapi.Document
 // @Failure 400 {object} response.ErrorResponse
 // @Router /api/v2/organizations/{name}/ansible/schedules [get]
 func (h *ScheduleHandler) ListByOrganization(c *gin.Context) {
@@ -785,45 +613,45 @@ func (h *ScheduleHandler) ListByOrganization(c *gin.Context) {
 	// RBAC: check org-level read permission
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgReadAnsible(c.Request.Context(), user.ID, org.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to list schedules in this organization"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to list schedules in this organization")
 		return
 	}
 
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	// page[number]/page[size], not limit/offset: every client builds the former (pageQuery in
+	// frontend/src/api/ansible.ts), so reading the latter silently discarded the requested size
+	// and applied this handler's own default of 20 instead. Parsed inline to match the sibling
+	// Ansible handlers (groups.go, jobs.go) - the shared paginate() helper is unexported and
+	// lives in the terraform package, so this one cannot reach it.
+	page, _ := strconv.Atoi(c.DefaultQuery("page[number]", "1"))
+	perPage, _ := strconv.Atoi(c.DefaultQuery("page[size]", "20"))
+	if perPage > 100 {
+		perPage = 100
+	}
+	offset := (page - 1) * perPage
 
-	schedules, total, err := h.schedulerService.ListSchedules(orgID, limit, offset)
+	schedules, total, err := h.schedulerService.ListSchedules(orgID, perPage, offset)
 	if err != nil {
 		response.InternalError(c, err.Error())
 		return
 	}
 
-	formatted := make([]gin.H, 0, len(schedules))
+	formatted := make([]jsonapi.Resource[ScheduleAttributes], 0, len(schedules))
 	for i := range schedules {
 		formatted = append(formatted, formatScheduleResponse(&schedules[i]))
 	}
-	response.Paginated(c, formatted, total, limit, offset)
+	// The JSON:API envelope, not response.Paginated: fetchAllPages reads
+	// meta.pagination.total-pages and fell back to "one page" against the old top-level shape,
+	// capping the Schedules screen at 20 rows.
+	jsonapi.WriteDocumentMeta(c, http.StatusOK, formatted, jsonapi.NewPaginationMeta(page, perPage, total))
 }
 
 // RunNow triggers immediate execution of a schedule
@@ -831,7 +659,7 @@ func (h *ScheduleHandler) ListByOrganization(c *gin.Context) {
 // @Description Trigger immediate execution of a schedule
 // @Tags Ansible Schedules
 // @Param id path string true "Schedule ID"
-// @Success 200 {object} gin.H
+// @Success 200 {object} response.MessageResponse
 // @Failure 400 {object} response.ErrorResponse
 // @Failure 500 {object} response.ErrorResponse
 // @Router /api/v2/ansible/schedules/{id}/actions/run-now [post]
@@ -850,28 +678,16 @@ func (h *ScheduleHandler) RunNow(c *gin.Context) {
 	}
 	user, err := h.authService.GetUserFromContext(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"errors": []gin.H{
-				{"status": "401", "title": "Unauthorized", "detail": "Authentication required"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusUnauthorized, "Unauthorized", "Authentication required")
 		return
 	}
 	hasPermission, err := h.rbacService.CheckOrgManageAnsible(c.Request.Context(), user.ID, schedule.OrganizationID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []gin.H{
-				{"status": "500", "title": "Internal Server Error", "detail": "Failed to check permissions"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusInternalServerError, "Internal Server Error", "Failed to check permissions")
 		return
 	}
 	if !hasPermission {
-		c.JSON(http.StatusForbidden, gin.H{
-			"errors": []gin.H{
-				{"status": "403", "title": "Forbidden", "detail": "You do not have permission to run this schedule"},
-			},
-		})
+		jsonapi.WriteError(c, http.StatusForbidden, "Forbidden", "You do not have permission to run this schedule")
 		return
 	}
 
@@ -880,5 +696,5 @@ func (h *ScheduleHandler) RunNow(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Schedule triggered"})
+	response.Message(c, http.StatusOK, "Schedule triggered")
 }

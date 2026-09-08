@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
 	"github.com/michielvha/stackweaver/backend/internal/services/registry"
 	"github.com/michielvha/stackweaver/core/models"
@@ -53,25 +54,19 @@ func (h *RegistryModuleHandler) ListModules(c *gin.Context) {
 
 	modules, total, err := h.moduleService.ListModules(namespace, provider, verified, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{err.Error()},
-		})
+		jsonapi.WriteRegistryLookupError(c, err, "module not found", "failed to list modules")
 		return
 	}
 	modules = h.filterAccessibleModules(c, modules)
 
 	// Format response according to Terraform Registry API spec
-	response := gin.H{
-		"meta": gin.H{
-			"limit":          limit,
-			"current_offset": offset,
-		},
-		"modules": formatModules(modules),
+	response := RegistryModuleListResponse{
+		Meta:    RegistryListMeta{Limit: limit, CurrentOffset: offset},
+		Modules: formatModules(modules),
 	}
-
 	if int64(offset+limit) < total {
-		response["meta"].(gin.H)["next_offset"] = offset + limit
-		response["meta"].(gin.H)["next_url"] = buildNextURL(c, offset+limit, limit, provider, verified)
+		response.Meta.NextOffset = offset + limit
+		response.Meta.NextURL = buildNextURL(c, offset+limit, limit, provider, verified)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -81,9 +76,7 @@ func (h *RegistryModuleHandler) ListModules(c *gin.Context) {
 func (h *RegistryModuleHandler) SearchModules(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"errors": []string{"query parameter 'q' is required"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusBadRequest, "query parameter 'q' is required")
 		return
 	}
 
@@ -108,24 +101,18 @@ func (h *RegistryModuleHandler) SearchModules(c *gin.Context) {
 
 	modules, total, err := h.moduleService.SearchModules(query, namespace, provider, verified, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{err.Error()},
-		})
+		jsonapi.WriteRegistryLookupError(c, err, "module not found", "failed to list modules")
 		return
 	}
 	modules = h.filterAccessibleModules(c, modules)
 
-	response := gin.H{
-		"meta": gin.H{
-			"limit":          limit,
-			"current_offset": offset,
-		},
-		"modules": formatModules(modules),
+	response := RegistryModuleListResponse{
+		Meta:    RegistryListMeta{Limit: limit, CurrentOffset: offset},
+		Modules: formatModules(modules),
 	}
-
 	if int64(offset+limit) < total {
-		response["meta"].(gin.H)["next_offset"] = offset + limit
-		response["meta"].(gin.H)["next_url"] = buildSearchNextURL(c, query, offset+limit, limit, namespace, provider, verified)
+		response.Meta.NextOffset = offset + limit
+		response.Meta.NextURL = buildSearchNextURL(c, query, offset+limit, limit, namespace, provider, verified)
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -139,9 +126,7 @@ func (h *RegistryModuleHandler) GetModuleVersions(c *gin.Context) {
 
 	module, err := h.moduleService.GetModule(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 	if !authorizeRegistryRead(c, h.authService, h.orgRepo, module.OrganizationID, false) {
@@ -150,14 +135,12 @@ func (h *RegistryModuleHandler) GetModuleVersions(c *gin.Context) {
 
 	versions, err := h.moduleService.GetModuleVersions(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 
 	// Format according to Terraform Registry API spec
-	versionList := make([]gin.H, 0, len(versions))
+	versionList := make([]ModuleVersionEntry, 0, len(versions))
 	for _, v := range versions {
 		submodules := []string{}
 		if v.Submodules != nil {
@@ -170,19 +153,17 @@ func (h *RegistryModuleHandler) GetModuleVersions(c *gin.Context) {
 			}
 		}
 
-		versionList = append(versionList, gin.H{
-			"version":    v.Version,
-			"submodules": submodules,
+		versionList = append(versionList, ModuleVersionEntry{
+			Version:    v.Version,
+			Submodules: submodules,
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"modules": []gin.H{
-			{
-				"source":   "", // Will be populated from module source
-				"versions": versionList,
-			},
-		},
+	c.JSON(http.StatusOK, ModuleVersionsResponse{
+		Modules: []ModuleVersionsEntry{{
+			Source:   "", // Will be populated from module source
+			Versions: versionList,
+		}},
 	})
 }
 
@@ -194,9 +175,7 @@ func (h *RegistryModuleHandler) GetModule(c *gin.Context) {
 
 	module, err := h.moduleService.GetModule(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 	// AUD-123: every module belongs to an org's private registry - gate on membership.
@@ -206,9 +185,7 @@ func (h *RegistryModuleHandler) GetModule(c *gin.Context) {
 
 	latestVersion, err := h.moduleService.GetLatestVersion(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"No versions found for this module"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "No versions found for this module")
 		return
 	}
 
@@ -225,9 +202,7 @@ func (h *RegistryModuleHandler) GetModuleVersion(c *gin.Context) {
 
 	module, err := h.moduleService.GetModule(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 	if !authorizeRegistryRead(c, h.authService, h.orgRepo, module.OrganizationID, false) {
@@ -236,9 +211,7 @@ func (h *RegistryModuleHandler) GetModuleVersion(c *gin.Context) {
 
 	moduleVersion, err := h.moduleService.GetModuleVersion(namespace, name, provider, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module version not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module version not found")
 		return
 	}
 
@@ -256,9 +229,7 @@ func (h *RegistryModuleHandler) DownloadModule(c *gin.Context) {
 
 	module, err := h.moduleService.GetModule(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 	if !authorizeRegistryRead(c, h.authService, h.orgRepo, module.OrganizationID, false) {
@@ -269,9 +240,7 @@ func (h *RegistryModuleHandler) DownloadModule(c *gin.Context) {
 	if version == "" {
 		latestVersion, err := h.moduleService.GetLatestVersion(namespace, name, provider)
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{
-				"errors": []string{"Module or version not found"},
-			})
+			jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module or version not found")
 			return
 		}
 		version = latestVersion.Version
@@ -280,9 +249,7 @@ func (h *RegistryModuleHandler) DownloadModule(c *gin.Context) {
 	// Get download URL (presigned)
 	downloadURL, err := h.moduleService.GetDownloadURL(c.Request.Context(), namespace, name, provider, version)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module version not available for download"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module version not available for download")
 		return
 	}
 
@@ -310,9 +277,7 @@ func (h *RegistryModuleHandler) GetModuleDownloadsSummary(c *gin.Context) {
 
 	module, err := h.moduleService.GetModule(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"Module not found"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "Module not found")
 		return
 	}
 	if !authorizeRegistryRead(c, h.authService, h.orgRepo, module.OrganizationID, false) {
@@ -321,31 +286,25 @@ func (h *RegistryModuleHandler) GetModuleDownloadsSummary(c *gin.Context) {
 
 	latestVersion, err := h.moduleService.GetLatestVersion(namespace, name, provider)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{
-			"errors": []string{"No versions found for this module"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusNotFound, "No versions found for this module")
 		return
 	}
 
 	stats, err := h.moduleService.GetDownloadStats(latestVersion.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"errors": []string{"Failed to get download statistics"},
-		})
+		jsonapi.WriteRegistryError(c, http.StatusInternalServerError, "Failed to get download statistics")
 		return
 	}
 
 	// Format according to Terraform Registry v2 API spec
-	c.JSON(http.StatusOK, gin.H{
-		"data": gin.H{
-			"type": "module-downloads-summary",
-			"id":   latestVersion.ID.String(),
-			"attributes": gin.H{
-				"week":  stats["week"],
-				"month": stats["month"],
-				"year":  stats["year"],
-				"total": stats["total"],
-			},
+	jsonapi.WriteDocument(c, http.StatusOK, jsonapi.Resource[ModuleDownloadsSummaryAttributes]{
+		ID:   latestVersion.ID.String(),
+		Type: "module-downloads-summary",
+		Attributes: ModuleDownloadsSummaryAttributes{
+			Week:  stats["week"],
+			Month: stats["month"],
+			Year:  stats["year"],
+			Total: stats["total"],
 		},
 	})
 }
@@ -371,8 +330,8 @@ func (h *RegistryModuleHandler) filterAccessibleModules(c *gin.Context, modules 
 
 // Helper functions
 
-func formatModules(modules []models.Module) []gin.H {
-	result := make([]gin.H, 0, len(modules))
+func formatModules(modules []models.Module) []RegistryModuleSummary {
+	result := make([]RegistryModuleSummary, 0, len(modules))
 	for _, m := range modules {
 		// Get latest version for each module
 		var latestVersion string
@@ -390,123 +349,119 @@ func formatModules(modules []models.Module) []gin.H {
 			moduleID += "/" + latestVersion
 		}
 
-		result = append(result, gin.H{
-			"id":           moduleID,
-			"owner":        "",
-			"namespace":    m.Organization.Name,
-			"name":         m.Name,
-			"version":      latestVersion,
-			"provider":     m.Provider,
-			"description":  m.Description,
-			"source":       m.Source,
-			"published_at": publishedAt.Format("2006-01-02T15:04:05Z"),
-			"downloads":    downloads,
-			"verified":     m.Verified,
+		result = append(result, RegistryModuleSummary{
+			ID:          moduleID,
+			Namespace:   m.Organization.Name,
+			Name:        m.Name,
+			Version:     latestVersion,
+			Provider:    m.Provider,
+			Description: m.Description,
+			Source:      m.Source,
+			PublishedAt: publishedAt.Format("2006-01-02T15:04:05Z"),
+			Downloads:   downloads,
+			Verified:    m.Verified,
 		})
 	}
 	return result
 }
 
-func formatModuleDetail(module *models.Module, version *models.ModuleVersion) gin.H {
+func formatModuleDetail(module *models.Module, version *models.ModuleVersion) RegistryModuleDetail {
 	// Get all versions for this module
 	allVersions := make([]string, 0, len(module.Versions))
 	for _, v := range module.Versions {
 		allVersions = append(allVersions, v.Version)
 	}
 
-	// Format inputs
-	inputs := []gin.H{}
+	// The parsed-config projections below shape the stored parse blobs, whose inner values are
+	// arbitrary JSON from the module's own configuration - hence the any-typed members.
+	inputs := []RegistryModuleInput{}
 	if version.Inputs != nil {
 		if inputsList, ok := version.Inputs["inputs"].([]interface{}); ok {
 			for _, input := range inputsList {
 				if inputMap, ok := input.(map[string]interface{}); ok {
-					inputs = append(inputs, gin.H{
-						"name":        inputMap["name"],
-						"description": inputMap["description"],
-						"default":     inputMap["default"],
-						"type":        inputMap["type"],
+					inputs = append(inputs, RegistryModuleInput{
+						Name:        inputMap["name"],
+						Description: inputMap["description"],
+						Default:     inputMap["default"],
+						Type:        inputMap["type"],
 					})
 				}
 			}
 		}
 	}
 
-	// Format outputs
-	outputs := []gin.H{}
+	outputs := []RegistryModuleOutput{}
 	if version.Outputs != nil {
 		if outputsList, ok := version.Outputs["outputs"].([]interface{}); ok {
 			for _, output := range outputsList {
 				if outputMap, ok := output.(map[string]interface{}); ok {
-					outputs = append(outputs, gin.H{
-						"name":        outputMap["name"],
-						"description": outputMap["description"],
+					outputs = append(outputs, RegistryModuleOutput{
+						Name:        outputMap["name"],
+						Description: outputMap["description"],
 					})
 				}
 			}
 		}
 	}
 
-	// Format resources
-	resources := []gin.H{}
+	resources := []RegistryModuleResource{}
 	if version.Resources != nil {
 		if resourcesList, ok := version.Resources["resources"].([]interface{}); ok {
 			for _, resource := range resourcesList {
 				if resourceMap, ok := resource.(map[string]interface{}); ok {
-					resources = append(resources, gin.H{
-						"name": resourceMap["name"],
-						"type": resourceMap["type"],
+					resources = append(resources, RegistryModuleResource{
+						Name: resourceMap["name"],
+						Type: resourceMap["type"],
 					})
 				}
 			}
 		}
 	}
 
-	// Format submodules
-	submodules := []gin.H{}
+	submodules := []RegistryModuleSubmodule{}
 	if version.Submodules != nil {
 		if submodsList, ok := version.Submodules["submodules"].([]interface{}); ok {
 			for _, submod := range submodsList {
 				if submodMap, ok := submod.(map[string]interface{}); ok {
 					submodReadme := ""
 					if readmeVal, ok := submodMap["readme"].(string); ok {
-						submodReadme = readmeVal // Return raw markdown for frontend Shiki rendering
+						submodReadme = readmeVal // raw markdown for frontend Shiki rendering
 					}
-					submodules = append(submodules, gin.H{
-						"path":    submodMap["path"],
-						"readme":  submodReadme,
-						"empty":   submodMap["empty"],
-						"inputs":  submodMap["inputs"],
-						"outputs": submodMap["outputs"],
+					submodules = append(submodules, RegistryModuleSubmodule{
+						Path:    submodMap["path"],
+						Readme:  submodReadme,
+						Empty:   submodMap["empty"],
+						Inputs:  submodMap["inputs"],
+						Outputs: submodMap["outputs"],
 					})
 				}
 			}
 		}
 	}
 
-	return gin.H{
-		"id":           formatModuleIDWithVersion(module, version),
-		"owner":        "",
-		"namespace":    module.Organization.Name,
-		"name":         module.Name,
-		"version":      version.Version,
-		"provider":     module.Provider,
-		"description":  module.Description,
-		"source":       module.Source,
-		"published_at": version.PublishedAt.Format("2006-01-02T15:04:05Z"),
-		"downloads":    version.Downloads,
-		"verified":     module.Verified,
-		"root": gin.H{
-			"path":         "",
-			"readme":       version.Readme, // Return raw markdown for frontend Shiki rendering
-			"empty":        false,
-			"inputs":       inputs,
-			"outputs":      outputs,
-			"dependencies": []gin.H{}, // TODO: parse from version.Dependencies
-			"resources":    resources,
+	return RegistryModuleDetail{
+		RegistryModuleSummary: RegistryModuleSummary{
+			ID:          formatModuleIDWithVersion(module, version),
+			Namespace:   module.Organization.Name,
+			Name:        module.Name,
+			Version:     version.Version,
+			Provider:    module.Provider,
+			Description: module.Description,
+			Source:      module.Source,
+			PublishedAt: version.PublishedAt.Format("2006-01-02T15:04:05Z"),
+			Downloads:   version.Downloads,
+			Verified:    module.Verified,
 		},
-		"submodules": submodules,
-		"providers":  []string{module.Provider}, // TODO: extract from dependencies
-		"versions":   allVersions,
+		Root: RegistryModuleRoot{
+			Readme:       version.Readme, // raw markdown for frontend Shiki rendering
+			Inputs:       inputs,
+			Outputs:      outputs,
+			Dependencies: []struct{}{}, // TODO: parse from version.Dependencies
+			Resources:    resources,
+		},
+		Submodules: submodules,
+		Providers:  []string{module.Provider}, // TODO: extract from dependencies
+		Versions:   allVersions,
 	}
 }
 
