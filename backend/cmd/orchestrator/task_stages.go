@@ -167,12 +167,17 @@ func (d *taskStageDeps) fireStageWebhooks(ctx context.Context, stage *models.Tas
 			base.RunCreatedBy = u.Email
 		}
 	}
+	// The configuration version is loaded within the run's workspace before anything of it goes
+	// into the payload: the request is sent to an external service together with a URL to
+	// download the uploaded code, and a run row stored before the API checked may name a
+	// configuration version of another workspace. That one is not found, and the payload carries
+	// no configuration version at all.
 	if run.ConfigurationVersionID != nil {
-		cvID := *run.ConfigurationVersionID
-		base.ConfigurationVersionID = &cvID
-		dl := fmt.Sprintf("%s/api/v2/configuration-versions/%s/download", d.apiURL, cvID)
-		base.ConfigurationVersionDownloadURL = &dl
-		if cv, err := d.configVerRepo.GetByID(cvID); err == nil && cv != nil {
+		if cv, err := d.configVerRepo.GetByIDForWorkspace(*run.ConfigurationVersionID, run.WorkspaceID); err == nil && cv != nil {
+			cvID := cv.ID
+			base.ConfigurationVersionID = &cvID
+			dl := fmt.Sprintf("%s/api/v2/configuration-versions/%s/download", d.apiURL, cvID)
+			base.ConfigurationVersionDownloadURL = &dl
 			base.IsSpeculative = cv.Speculative
 			if cv.SourceBranch != "" {
 				b := cv.SourceBranch

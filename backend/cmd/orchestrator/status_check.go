@@ -50,7 +50,9 @@ func updatePRStatusCheck(
 		return
 	}
 
-	configVersion, err := configVersionRepo.GetByID(*run.ConfigurationVersionID)
+	// Loaded within the run's workspace: the commit a status is posted on must be one this
+	// workspace's own configuration version was cloned from.
+	configVersion, err := configVersionRepo.GetByIDForWorkspace(*run.ConfigurationVersionID, run.WorkspaceID)
 	if err != nil || configVersion == nil {
 		logger.Infof("[STATUS_CHECK] Failed to get config version for run %s: %v", run.ID, err)
 		return
@@ -79,8 +81,10 @@ func updatePRStatusCheck(
 		return
 	}
 
-	// Get VCS connection
-	vcsConn, err := vcsConnectionRepo.GetByID(*workspace.VCSConnectionID)
+	// Get the VCS connection, within the workspace's organization: the status is posted with the
+	// connection's installation or token, and the orchestrator has no caller to authorize. A
+	// workspace row that names another organization's connection finds none.
+	vcsConn, err := vcsConnectionRepo.OrganizationScope().WithContext(ctx).VCSConnectionForProject(*workspace.VCSConnectionID, workspace.ProjectID)
 	if err != nil || vcsConn == nil {
 		logger.Warnf("[STATUS_CHECK] Failed to get VCS connection %s for workspace %s: %v", *workspace.VCSConnectionID, workspace.ID, err)
 		return
