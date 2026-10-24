@@ -4,10 +4,12 @@ package handlers
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/backend/internal/services/auth"
+	"github.com/michielvha/stackweaver/backend/internal/services/platformadmin"
 	"github.com/michielvha/stackweaver/backend/internal/services/profile"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -25,6 +27,14 @@ type AccountHandlerV2 struct {
 	// profiles is the identity provider's copy of the name and email, kept in step with the
 	// account; nil when the identity provider's profile API is not configured.
 	profiles accountProfileSource
+	// admins reports the caller's platform administrator status and the installation's
+	// organization-creation setting; nil reports neither.
+	admins *platformadmin.Service
+}
+
+// SetPlatformAdmin gives the account resource the caller's platform status (#132, D4).
+func (h *AccountHandlerV2) SetPlatformAdmin(admins *platformadmin.Service) {
+	h.admins = admins
 }
 
 // accountProfileSource is the part of profile.Service the account calls, declared where it is
@@ -95,6 +105,14 @@ func (h *AccountHandlerV2) Update(c *gin.Context) {
 		return
 	}
 
+	// The stored email is written only by the sign-in sync, from an address the identity provider
+	// has verified. A requested change goes to the identity provider and stays unconfirmed until
+	// the person verifies it there, so without one there is nowhere to send it.
+	if attrs.Email != nil && *attrs.Email != "" && !strings.EqualFold(*attrs.Email, user.Email) && h.profiles == nil {
+		jsonAPIError(c, http.StatusUnprocessableEntity, "Unprocessable Entity", "the email address is managed by the identity provider")
+		return
+	}
+
 	// The identity provider holds the name and email too; a non-empty new value goes there first,
 	// so the two copies cannot disagree after a failure.
 	if h.profiles != nil {
@@ -104,7 +122,9 @@ func (h *AccountHandlerV2) Update(c *gin.Context) {
 			if attrs.Name != nil && *attrs.Name != "" {
 				update.Name, changed = *attrs.Name, true
 			}
-			if attrs.Email != nil && *attrs.Email != "" {
+			// Only a different address is a change; resending the stored one must not ask the
+			// identity provider to set, and possibly re-verify, the address it already holds.
+			if attrs.Email != nil && *attrs.Email != "" && !strings.EqualFold(*attrs.Email, user.Email) {
 				update.Email, changed = *attrs.Email, true
 			}
 			if changed {
@@ -121,7 +141,6 @@ func (h *AccountHandlerV2) Update(c *gin.Context) {
 		into  *string
 	}{
 		{attrs.Username, &user.Username},
-		{attrs.Email, &user.Email},
 		{attrs.Name, &user.Name},
 		{attrs.Bio, &user.Bio},
 		{attrs.Company, &user.Company},
@@ -155,7 +174,13 @@ func (h *AccountHandlerV2) accountResource(c *gin.Context, user *models.User) js
 	if h.profiles != nil {
 		if subject, err := h.authService.GetUserSubject(c); err == nil {
 			if p, err := h.profiles.GetUserProfile(subject); err == nil && p != nil {
-				if p.Email != "" {
+				switch {
+				case p.Email == "":
+				case user.Email != "" && !strings.EqualFold(p.Email, user.Email):
+					// The identity provider holds an address the sign-in sync has not stored yet,
+					// because it is not verified: TFE reports that as the unconfirmed email.
+					attrs.UnconfirmedEmail = p.Email
+				default:
 					attrs.Email = p.Email
 				}
 				if p.Name != "" {
@@ -169,5 +194,9 @@ func (h *AccountHandlerV2) accountResource(c *gin.Context, user *models.User) js
 		attrs.Username = attrs.Email
 	}
 	attrs.AvatarURL = h.authService.FetchUserInfoPicture(c.Request.Context(), c)
+	// TFE's site-admin attribute and permissions object: the platform administrator, and whether
+	// the installation lets this caller create organizations.
+	attrs.IsSiteAdmin, attrs.DeclaredByDeployment = platformadmin.Status(user)
+	attrs.Permissions.CanCreateOrganizations = h.admins == nil || h.admins.CanCreateOrganizations(c.Request.Context(), user)
 	return jsonapi.Resource[AccountAttributes]{ID: user.ID.String(), Type: "users", Attributes: attrs}
 }
