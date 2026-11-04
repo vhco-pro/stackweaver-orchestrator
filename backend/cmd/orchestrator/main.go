@@ -20,10 +20,15 @@ import (
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/queue"
 	"github.com/michielvha/stackweaver/core/repository"
+	"github.com/michielvha/stackweaver/core/services/ansible"
 	"github.com/michielvha/stackweaver/core/services/encryptionkey"
 	"github.com/michielvha/stackweaver/core/services/notification"
 	"github.com/michielvha/stackweaver/core/services/runtask"
 	"github.com/michielvha/stackweaver/core/services/vcs"
+	"github.com/michielvha/stackweaver/core/services/wakeup"
+	"github.com/michielvha/stackweaver/core/settings"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 // getEnv returns the value of an environment variable or a fallback default.
@@ -85,13 +90,22 @@ func main() {
 		//nolint:gocritic // False positive: we explicitly close redisQueue before logger.Fatalf
 		logger.Fatalf("Failed to connect to database: %v", err)
 	}
+	// The plan JSON runs store is sealed at rest under ENCRYPTION_KEY (#933, D2, AC73), the key the
+	// API seals it with; the orchestrator reads it for commit statuses and run-task stages.
+	planSealer, err := crypto.NewCryptoService(encryptionkey.Resolve(os.Getenv("ENCRYPTION_KEY")))
+	if err != nil {
+		logger.Fatalf("Setting up encryption at rest of plan output: %v", err)
+	}
+	models.SetPlanOutputSealer(planSealer)
+	// A run the orchestrator creates (a run trigger's) wakes its pool's launchers once committed
+	// (#933, AC19); the routing sweep below stays the safety net for a lost wakeup.
+	repository.SetRunWaker(wakeup.PoolWaker(redisQueue.Client()))
 
 	runRepo := repository.NewRunRepository(db)
 	workspaceRepo := repository.NewWorkspaceRepository(db)
 	configVersionRepo := repository.NewConfigurationVersionRepository(db)
 	runTriggerRepo := repository.NewRunTriggerRepository(db)
 	vcsConnectionRepo := repository.NewVCSConnectionRepository(db)
-	agentPoolRepo := repository.NewAgentPoolRepository(db)
 	ansibleJobRepo := repository.NewAnsibleJobRepository(db)
 
 	// Initialize GitHub App Manager and status service for PR status checks
@@ -194,6 +208,25 @@ func main() {
 	// (drain) instead of returning immediately and killing in-flight DB writes mid-statement.
 	var wg sync.WaitGroup
 
+	// The API migrates the schema; on an upgrade this process can start first. Nothing below runs
+	// against the previous release's schema, and a stop signal still ends the wait.
+	waitCtx, stopWait := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	err = waitForSchema(waitCtx, func() ([]string, error) { return models.MissingSchema(db) }, schemaWaitInterval, logger.Warnf)
+	stopWait()
+	if err != nil {
+		logger.Info("Orchestrator stopped while waiting for the database schema")
+		return
+	}
+
+	// Runs a retired queue runner was handed are offered to launchers (#933, D14).
+	if err := sweepQueueDispatches(runRepo, 0); err != nil {
+		logger.Errorf("Error sweeping queue dispatches at start: %v", err)
+	}
+	// Ansible jobs a release before the launchers queued are given their hosted pool (#933, D9).
+	if err := sweepPoollessJobs(ctx, db, redisQueue.Client()); err != nil {
+		logger.Errorf("Error sweeping pool-less Ansible jobs at start: %v", err)
+	}
+
 	// Process pending runs every 5 seconds
 	wg.Add(1)
 	go func() {
@@ -207,7 +240,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := processPendingRuns(ctx, redisQueue, runRepo, workspaceRepo, agentPoolRepo); err != nil {
+				if err := processPendingRuns(ctx, db, redisQueue, runRepo); err != nil {
 					logger.Errorf("Error processing pending runs: %v", err)
 				}
 			}
@@ -233,7 +266,12 @@ func main() {
 				if err := cleanupStuckAnsibleJobs(ctx, ansibleJobRepo); err != nil {
 					logger.Errorf("Error cleaning up stuck ansible jobs: %v", err)
 				}
-				reclaimOrphanedQueueMessages(ctx, redisQueue)
+				if err := sweepQueueDispatches(runRepo, 5*time.Minute); err != nil {
+					logger.Errorf("Error sweeping queue dispatches: %v", err)
+				}
+				if err := sweepPoollessJobs(ctx, db, redisQueue.Client()); err != nil {
+					logger.Errorf("Error sweeping pool-less Ansible jobs: %v", err)
+				}
 			}
 		}
 	}()
@@ -358,7 +396,7 @@ func main() {
 	}
 }
 
-func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRepo *repository.RunRepository, workspaceRepo *repository.WorkspaceRepository, agentPoolRepo *repository.AgentPoolRepository) error {
+func processPendingRuns(ctx context.Context, db *gorm.DB, redisQueue *queue.RedisQueue, runRepo *repository.RunRepository) error {
 	// Get pending runs (initial state) and applying runs (plan-and-apply runs ready for apply phase)
 	pendingRuns, err := runRepo.ListByStatus(models.RunStatusPending, 10)
 	if err != nil {
@@ -423,80 +461,40 @@ func processPendingRuns(ctx context.Context, redisQueue *queue.RedisQueue, runRe
 			continue
 		}
 
-		// Check if workspace is configured for self-hosted execution
-		// If so, skip enqueueing to Redis - self-hosted runners poll the API directly
-		workspace, err := workspaceRepo.GetByID(reloadedRun.WorkspaceID)
-		if err != nil {
-			logger.Errorf("Failed to get workspace for run %s: %v", reloadedRun.ID, err)
-			continue
+		// Route the run (#933, D9): the customer pool the level rule resolves, or the
+		// organization's hosted pool when everything resolves to remote. Nothing is enqueued: a
+		// launcher of the pool is offered the run through its heartbeat, and one holding a long
+		// poll is woken for it. Only an unreserved run is re-stamped, so routing never moves a run
+		// a launcher already holds.
+		if err := routeRun(ctx, db, redisQueue.Client(), reloadedRun); err != nil {
+			logger.Errorf("Failed to route run %s: %v", reloadedRun.ID, err)
 		}
-
-		// If workspace has execution_mode="agent" and agent_pool_id set, it's for self-hosted runners
-		if workspace.ExecutionMode == "agent" && workspace.AgentPoolID != nil {
-			// Verify the agent pool exists
-			_, err := agentPoolRepo.GetByID(*workspace.AgentPoolID, false)
-			if err == nil {
-				// Run is for self-hosted execution - assign agent_pool_id to the run if not already set
-				if reloadedRun.AgentPoolID == nil {
-					reloadedRun.AgentPoolID = workspace.AgentPoolID
-					if err := runRepo.Update(reloadedRun); err != nil {
-						logger.Errorf("Failed to update run %s with agent_pool_id: %v", reloadedRun.ID, err)
-					} else {
-						logger.Infof("Run %s assigned to agent pool %s for self-hosted execution", reloadedRun.ID, workspace.AgentPoolID)
-					}
-				}
-				// Skip enqueueing to Redis - self-hosted runners will poll for this job
-				logger.Debugf("Skipping Redis enqueue for run %s - configured for self-hosted execution (pool: %s)", reloadedRun.ID, workspace.AgentPoolID)
-				continue
-			}
-			logger.Warnf("Workspace %s has agent_pool_id set but pool not found, falling back to platform-hosted execution", workspace.ID)
+		// A VCS-backed run without a configuration version waits for the configuration_snapshot
+		// work item that captures it (#933, decision 18); the executor never clones.
+		if err := requestRunConfiguration(ctx, db, redisQueue.Client(), reloadedRun); err != nil {
+			logger.Errorf("Failed to request the configuration of run %s: %v", reloadedRun.ID, err)
 		}
-
-		// Run is for platform execution (Redis). Clear agent_pool_id so self-hosted
-		// runners don't pick it up (e.g. workspace was switched from agent to remote).
-		if reloadedRun.AgentPoolID != nil {
-			reloadedRun.AgentPoolID = nil
-			if err := runRepo.Update(reloadedRun); err != nil {
-				logger.Warnf("Failed to clear agent_pool_id on run %s: %v", reloadedRun.ID, err)
-				continue // Do not enqueue; run would still be visible to agent
-			}
-		}
-
-		// AUD-007/112: atomically claim the run for dispatch BEFORE enqueueing. The claim succeeds
-		// for exactly one caller, so this run is enqueued to Redis at most once - no more
-		// re-enqueueing the same run every 5s tick while a runner is busy (duplicate plans), and no
-		// second concurrent apply of an `applying` run. A run whose claim we don't win (already
-		// dispatched, or its status changed) is simply skipped this tick.
-		claimed, err := runRepo.ClaimForDispatch(reloadedRun.ID)
-		if err != nil {
-			logger.Errorf("Failed to claim run %s for dispatch: %v", reloadedRun.ID, err)
-			continue
-		}
-		if !claimed {
-			logger.Debugf("Run %s already dispatched (or no longer dispatchable); skipping enqueue", reloadedRun.ID)
-			continue
-		}
-
-		// Create job struct matching runner's Job type
-		job := map[string]interface{}{
-			"run_id":       reloadedRun.ID,
-			"workspace_id": reloadedRun.WorkspaceID,
-			"operation":    string(reloadedRun.Operation),
-		}
-
-		// Enqueue expects interface{} and will marshal it itself
-		// Don't marshal here to avoid double-marshaling
-		if err := redisQueue.Enqueue(ctx, "runs", job); err != nil {
-			// Roll back the claim so the run can be re-dispatched on a later tick.
-			_ = runRepo.ClearDispatch(reloadedRun.ID)
-			logger.Errorf("Failed to enqueue job: %v", err)
-			continue
-		}
-
-		logger.Infof("Enqueued run: %s", reloadedRun.ID)
 	}
 
 	return nil
+}
+
+// requestRunConfiguration creates the configuration_snapshot work item of a run waiting for its
+// plan whose workspace is VCS-backed and that has no configuration version; one that exists is
+// left alone.
+func requestRunConfiguration(ctx context.Context, db *gorm.DB, rdb *redis.Client, run *models.Run) error {
+	if run.ConfigurationVersionID != nil || run.Status == models.RunStatusApplying {
+		return nil
+	}
+	var ws models.Workspace
+	if err := db.Select("id", "vcs_connection_id", "vcs_repository").First(&ws, "id = ?", run.WorkspaceID).Error; err != nil {
+		return fmt.Errorf("loading workspace %s: %w", run.WorkspaceID, err)
+	}
+	if ws.VCSConnectionID == nil || ws.VCSRepository == "" {
+		return nil
+	}
+	_, err := ansible.NewWorkItemService(db, rdb).RequestConfigurationSnapshot(ctx, run)
+	return err
 }
 
 // processRunTriggers fires tfe_run_trigger links: for each newly-applied run that hasn't been
@@ -668,8 +666,10 @@ func processChangeRequestNotifications(
 }
 
 func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) error {
-	// Find stuck runs (pending for more than 30 minutes, or running longer than timeout)
-	stuckRuns, err := runRepo.FindStuckRuns(30 * time.Minute)
+	// Find stuck runs (pending for more than 30 minutes, or running longer than their run timeout,
+	// resolved by the level rule down to the deployment default).
+	deploymentTimeout := settings.DeploymentRunTimeout(os.Getenv)
+	stuckRuns, err := runRepo.FindStuckRunsWithDefault(30*time.Minute, time.Duration(deploymentTimeout)*time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to find stuck runs: %w", err)
 	}
@@ -687,10 +687,7 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 			errorMessage = "Run was pending for too long and was automatically cancelled"
 		} else {
 			// Actively-executing run (planning/applying/legacy running) that exceeded its timeout.
-			timeout := 3600 // Default 1 hour
-			if run.Workspace.RunTimeout > 0 {
-				timeout = run.Workspace.RunTimeout
-			}
+			timeout := settings.EffectiveWorkspaceRunTimeout(&run.Workspace, deploymentTimeout).Value
 			errorMessage = fmt.Sprintf("Run exceeded timeout of %d seconds and was automatically cancelled", timeout)
 		}
 
@@ -707,27 +704,66 @@ func cleanupStuckRuns(ctx context.Context, runRepo *repository.RunRepository) er
 	return nil
 }
 
-// reclaimOrphanedQueueMessages requeues in-flight queue messages whose consumer died permanently
-// and never restarted to recover its own processing list (AUD-015 - the multi-replica case). The
-// 6h threshold is well beyond any legitimate run/job processing time (terraform run timeout defaults
-// to 2h and the stuck-run/job reapers fail anything past its timeout), so a healthy long-running job
-// is never reclaimed; the AUD-006 state lock is the final backstop against a reclaimed duplicate.
-func reclaimOrphanedQueueMessages(ctx context.Context, redisQueue *queue.RedisQueue) {
-	const threshold = 6 * time.Hour
-	for _, qn := range []string{"runs", "ansible_jobs", "ansible_sync"} {
-		if n, err := redisQueue.Reclaim(ctx, qn, threshold); err != nil {
-			logger.Errorf("Error reclaiming orphaned %s messages: %v", qn, err)
-		} else if n > 0 {
-			logger.Infof("Reclaimed %d orphaned %s message(s) from a permanently-dead consumer", n, qn)
+// sweepQueueDispatches re-dispatches runs a retired queue runner was handed and never started
+// (#933, D14): at start every one, then those claimed five minutes ago or more, so a run an old
+// orchestrator enqueued during a rolling upgrade is offered to a launcher instead of stranded.
+func sweepQueueDispatches(runRepo *repository.RunRepository, olderThan time.Duration) error {
+	n, err := runRepo.ReleaseQueueDispatches(olderThan)
+	if err != nil {
+		return fmt.Errorf("releasing queue dispatches: %w", err)
+	}
+	if n > 0 {
+		logger.Infof("Re-dispatched %d run(s) claimed onto a retired queue", n)
+	}
+	return nil
+}
+
+// poollessJobsPerSweep bounds the jobs one sweep stamps.
+const poollessJobsPerSweep = 200
+
+// sweepPoollessJobs gives a pending Ansible job that carries no pool its organization's hosted pool
+// and wakes that pool's launchers (#933, D9, AC58). Only a launch stamps a pool, so a job a release
+// before the launchers queued would otherwise never be offered after an upgrade. rdb may be nil.
+func sweepPoollessJobs(ctx context.Context, db *gorm.DB, rdb *redis.Client) error {
+	var stray []struct {
+		ID             uuid.UUID
+		OrganizationID uuid.UUID
+	}
+	err := db.WithContext(ctx).Table("ansible_jobs").
+		Select("ansible_jobs.id, projects.organization_id").
+		Joins("JOIN projects ON projects.id = ansible_jobs.project_id").
+		Where("ansible_jobs.status = ? AND ansible_jobs.agent_pool_id IS NULL", models.AnsibleJobStatusPending).
+		Limit(poollessJobsPerSweep).Scan(&stray).Error
+	if err != nil {
+		return fmt.Errorf("listing pending jobs without a pool: %w", err)
+	}
+	woken := map[uuid.UUID]bool{}
+	for _, j := range stray {
+		pool, _, err := repository.HostedPoolOf(db, j.OrganizationID)
+		if err != nil {
+			return err
+		}
+		if err := db.WithContext(ctx).Model(&models.AnsibleJob{}).
+			Where("id = ? AND agent_pool_id IS NULL", j.ID).Update("agent_pool_id", pool).Error; err != nil {
+			return fmt.Errorf("stamping job %s with its hosted pool: %w", j.ID, err)
+		}
+		if rdb != nil && !woken[pool] {
+			wakeup.Publish(ctx, rdb, wakeup.KeyForPool(pool.String(), true))
+			woken[pool] = true
 		}
 	}
+	if len(stray) > 0 {
+		logger.Infof("Gave %d pending Ansible job(s) without a pool their hosted pool", len(stray))
+	}
+	return nil
 }
 
 // cleanupStuckAnsibleJobs recovers Ansible jobs whose executor died mid-run, leaving them stuck
-// in `running` forever (AUD-016 - Ansible previously had no stuck-job recovery at all). Uses a
-// 1-hour default timeout when a job carries no explicit TimeoutSeconds.
+// in `running` forever (AUD-016 - Ansible previously had no stuck-job recovery at all). A job's
+// TimeoutSeconds is resolved by the level rule at launch; the deployment default covers a job
+// launched before that, which carries none.
 func cleanupStuckAnsibleJobs(ctx context.Context, jobRepo *repository.AnsibleJobRepository) error {
-	stuckJobs, err := jobRepo.FindStuckJobs(time.Hour)
+	stuckJobs, err := jobRepo.FindStuckJobs(time.Duration(settings.DeploymentRunTimeout(os.Getenv)) * time.Second)
 	if err != nil {
 		return fmt.Errorf("failed to find stuck ansible jobs: %w", err)
 	}
@@ -786,3 +822,24 @@ func updatePRStatusChecks(
 }
 
 // sync smoke test 1779753492
+
+// routeRun stamps a waiting run with the pool it executes on and wakes that pool's launchers.
+func routeRun(ctx context.Context, db *gorm.DB, rdb *redis.Client, run *models.Run) error {
+	pool, hosted, err := repository.RunPool(db, run.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if run.AgentPoolID == nil || *run.AgentPoolID != pool {
+		res := db.Model(&models.Run{}).Where("id = ? AND runner_id IS NULL", run.ID).Update("agent_pool_id", pool)
+		if res.Error != nil {
+			return fmt.Errorf("stamping run %s with pool %s: %w", run.ID, pool, res.Error)
+		}
+		if res.RowsAffected > 0 {
+			logger.Infof("Run %s routed to pool %s (hosted %t)", run.ID, pool, hosted)
+		}
+	}
+	if run.RunnerID == nil {
+		wakeup.Publish(ctx, rdb, wakeup.KeyForPool(pool.String(), hosted))
+	}
+	return nil
+}
