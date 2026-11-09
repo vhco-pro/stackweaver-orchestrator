@@ -10,6 +10,7 @@ import (
 
 	"github.com/michielvha/logger"
 	terraformHandlers "github.com/michielvha/stackweaver/backend/internal/api/v2/handlers/terraform"
+	"github.com/michielvha/stackweaver/backend/internal/api/v2/jsonapi"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/repository"
 	"github.com/michielvha/stackweaver/core/services/runtask"
@@ -132,6 +133,26 @@ func processTaskStages(ctx context.Context, d *taskStageDeps) {
 	}
 }
 
+// runTaskBase builds the run and workspace fields every run-task request of stage carries. The
+// run's creation is written through jsonapi.FormatTime, as every API timestamp is: the UTC
+// instant in RFC 3339, ending in Z.
+func runTaskBase(stage *models.TaskStage, run *models.Run, org *models.Organization, appURL string) runtask.Request {
+	return runtask.Request{
+		PayloadVersion:            1,
+		Stage:                     stage.Stage,
+		Capabilities:              runtask.Capabilities{Outcomes: true},
+		OrganizationName:          org.Name,
+		IsSpeculative:             false,
+		RunAppURL:                 fmt.Sprintf("%s/app/%s/workspaces/%s/runs/%s", appURL, org.Name, run.Workspace.Name, run.ID),
+		RunCreatedAt:              jsonapi.FormatTime(run.CreatedAt),
+		RunID:                     run.ID,
+		WorkspaceAppURL:           fmt.Sprintf("%s/app/%s/workspaces/%s", appURL, org.Name, run.Workspace.Name),
+		WorkspaceID:               run.WorkspaceID,
+		WorkspaceName:             run.Workspace.Name,
+		WorkspaceWorkingDirectory: run.Workspace.WorkingDirectory,
+	}
+}
+
 // fireStageWebhooks POSTs one signed request per task result of a freshly claimed stage. Delivery
 // failure marks that result `unreachable` (TFE semantics); the engine folds verdicts as callbacks
 // arrive (or immediately, if every delivery failed).
@@ -147,21 +168,7 @@ func (d *taskStageDeps) fireStageWebhooks(ctx context.Context, stage *models.Tas
 		return
 	}
 
-	// Shared run/workspace payload fields.
-	base := runtask.Request{
-		PayloadVersion:            1,
-		Stage:                     stage.Stage,
-		Capabilities:              runtask.Capabilities{Outcomes: true},
-		OrganizationName:          org.Name,
-		IsSpeculative:             false,
-		RunAppURL:                 fmt.Sprintf("%s/app/%s/workspaces/%s/runs/%s", d.appURL, org.Name, run.Workspace.Name, run.ID),
-		RunCreatedAt:              run.CreatedAt.Format(time.RFC3339),
-		RunID:                     run.ID,
-		WorkspaceAppURL:           fmt.Sprintf("%s/app/%s/workspaces/%s", d.appURL, org.Name, run.Workspace.Name),
-		WorkspaceID:               run.WorkspaceID,
-		WorkspaceName:             run.Workspace.Name,
-		WorkspaceWorkingDirectory: run.Workspace.WorkingDirectory,
-	}
+	base := runTaskBase(stage, run, org, d.appURL)
 	if run.CreatedBy != nil {
 		if u, err := d.userRepo.GetByID(*run.CreatedBy); err == nil {
 			base.RunCreatedBy = u.Email
