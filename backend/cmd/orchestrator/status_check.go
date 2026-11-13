@@ -301,9 +301,9 @@ func mapRunStatusToCheckState(run *models.Run) (vcs.StatusState, string, bool) {
 	// post-plan stage passing rests at post_plan_completed, which reports like planned.
 	case models.RunStatusPrePlanRunning, models.RunStatusPrePlanCompleted, models.RunStatusPostPlanRunning:
 		return vcs.StatusStatePending, "Terraform run tasks are running", true
-	case models.RunStatusPlanned, models.RunStatusPostPlanCompleted:
+	case models.RunStatusPlanned, models.RunStatusPostPlanCompleted, models.RunStatusPlannedAndFinished:
 		return vcs.StatusStateSuccess, buildPlannedDescription(run), true
-	case models.RunStatusFailed:
+	case models.RunStatusErrored:
 		desc := "Terraform plan failed"
 		if run.ErrorMessage != "" {
 			desc = fmt.Sprintf("Terraform plan failed: %s", run.ErrorMessage)
@@ -312,8 +312,10 @@ func mapRunStatusToCheckState(run *models.Run) (vcs.StatusState, string, bool) {
 			}
 		}
 		return vcs.StatusStateFailure, desc, true
-	case models.RunStatusCancelled:
+	case models.RunStatusCancelled, models.RunStatusForceCanceled:
 		return vcs.StatusStateError, "Terraform plan was cancelled", true
+	case models.RunStatusDiscarded:
+		return vcs.StatusStateError, "Terraform plan was discarded", true
 	default:
 		return "", "", false
 	}

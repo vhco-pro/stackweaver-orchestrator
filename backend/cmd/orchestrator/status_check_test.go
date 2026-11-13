@@ -46,8 +46,10 @@ func TestMapRunStatusToCheckState(t *testing.T) {
 		{"pending", models.RunStatusPending, vcs.StatusStatePending, true},
 		{"planning", models.RunStatusPlanning, vcs.StatusStatePending, true},
 		{"planned", models.RunStatusPlanned, vcs.StatusStateSuccess, true},
-		{"failed", models.RunStatusFailed, vcs.StatusStateFailure, true},
+		{"planned and finished", models.RunStatusPlannedAndFinished, vcs.StatusStateSuccess, true},
+		{"errored", models.RunStatusErrored, vcs.StatusStateFailure, true},
 		{"cancelled", models.RunStatusCancelled, vcs.StatusStateError, true},
+		{"discarded", models.RunStatusDiscarded, vcs.StatusStateError, true},
 		{"applying", models.RunStatusApplying, "", false},
 		{"applied", models.RunStatusApplied, "", false},
 	}
