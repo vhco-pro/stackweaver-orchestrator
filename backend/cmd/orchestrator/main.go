@@ -480,21 +480,80 @@ func processPendingRuns(ctx context.Context, db *gorm.DB, redisQueue *queue.Redi
 }
 
 // requestRunConfiguration creates the configuration_snapshot work item of a run waiting for its
-// plan whose workspace is VCS-backed and that has no configuration version; one that exists is
-// left alone.
+// plan whose configuration version is fetching (#938). A VCS run with no configuration version at
+// all, from before #938 or written by an older API replica during a rolling deploy, is converted
+// first: it gets a fetching version for its branch head, attached only while it still has none,
+// so a run another process converted is left as it is. A run whose capture is already waiting or
+// running keeps it.
 func requestRunConfiguration(ctx context.Context, db *gorm.DB, rdb *redis.Client, run *models.Run) error {
-	if run.ConfigurationVersionID != nil || run.Status == models.RunStatusApplying {
+	if run.Status == models.RunStatusApplying {
 		return nil
 	}
-	var ws models.Workspace
-	if err := db.Select("id", "vcs_connection_id", "vcs_repository").First(&ws, "id = ?", run.WorkspaceID).Error; err != nil {
-		return fmt.Errorf("loading workspace %s: %w", run.WorkspaceID, err)
+	cvID := run.ConfigurationVersionID
+	if cvID == nil {
+		var ws models.Workspace
+		if err := db.Select("id", "vcs_connection_id", "vcs_repository").First(&ws, "id = ?", run.WorkspaceID).Error; err != nil {
+			return fmt.Errorf("loading workspace %s: %w", run.WorkspaceID, err)
+		}
+		if ws.VCSConnectionID == nil || ws.VCSRepository == "" {
+			return nil
+		}
+		converted, err := convertToFetching(db, run)
+		if err != nil {
+			return err
+		}
+		cvID = converted
 	}
-	if ws.VCSConnectionID == nil || ws.VCSRepository == "" {
+	var cv models.ConfigurationVersion
+	if err := db.Select("id", "status").First(&cv, "id = ?", *cvID).Error; err != nil {
+		return fmt.Errorf("loading configuration version %s: %w", *cvID, err)
+	}
+	if cv.Status != models.ConfigurationVersionStatusFetching {
 		return nil
 	}
 	_, err := ansible.NewWorkItemService(db, rdb).RequestConfigurationSnapshot(ctx, run)
 	return err
+}
+
+// convertToFetching gives a VCS run with no configuration version a fetching one for its branch
+// head, in one transaction, and returns the version the run names afterwards.
+func convertToFetching(db *gorm.DB, run *models.Run) (*string, error) {
+	var attached string
+	err := db.Transaction(func(tx *gorm.DB) error {
+		cv := &models.ConfigurationVersion{
+			WorkspaceID: run.WorkspaceID, Status: models.ConfigurationVersionStatusFetching, Source: "tfe-vcs",
+			Speculative: run.Operation == models.RunOperationPlanOnly,
+		}
+		if err := tx.Create(cv).Error; err != nil {
+			return fmt.Errorf("creating the configuration version of run %s: %w", run.ID, err)
+		}
+		res := tx.Model(&models.Run{}).Where("id = ? AND configuration_version_id IS NULL", run.ID).Update("configuration_version_id", cv.ID)
+		if res.Error != nil {
+			return fmt.Errorf("attaching the configuration version of run %s: %w", run.ID, res.Error)
+		}
+		if res.RowsAffected == 1 {
+			attached = cv.ID
+			return nil
+		}
+		// Another process converted the run first: drop this version and use the run's.
+		if err := tx.Delete(&models.ConfigurationVersion{}, "id = ?", cv.ID).Error; err != nil {
+			return err
+		}
+		var current models.Run
+		if err := tx.Select("id", "configuration_version_id").First(&current, "id = ?", run.ID).Error; err != nil {
+			return err
+		}
+		if current.ConfigurationVersionID == nil {
+			return fmt.Errorf("run %s lost its configuration version while it was converted", run.ID)
+		}
+		attached = *current.ConfigurationVersionID
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	run.ConfigurationVersionID = &attached
+	return &attached, nil
 }
 
 // processRunTriggers fires tfe_run_trigger links: for each newly-applied run that hasn't been
