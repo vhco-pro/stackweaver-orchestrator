@@ -486,6 +486,8 @@ func processPendingRuns(ctx context.Context, db *gorm.DB, redisQueue *queue.Redi
 // so a run another process converted is left as it is. A run whose capture is already waiting or
 // running keeps it.
 func requestRunConfiguration(ctx context.Context, db *gorm.DB, rdb *redis.Client, run *models.Run) error {
+	// Every query, the upgrade conversion and the capture request included, follows ctx.
+	db = db.WithContext(ctx)
 	if run.Status == models.RunStatusApplying {
 		return nil
 	}
