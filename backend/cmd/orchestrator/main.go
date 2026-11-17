@@ -74,9 +74,9 @@ func main() {
 	db, err := repository.NewDatabase(repository.Config{
 		Host:            getEnv("DATABASE_HOST", "localhost"),
 		Port:            getEnvInt("DATABASE_PORT", 5432),
-		User:            getEnv("DATABASE_USER", "iac"),
-		Password:        getEnv("DATABASE_PASSWORD", "iac_password"),
-		DBName:          getEnv("DATABASE_NAME", "iac_platform"),
+		User:            getEnv("DATABASE_USER", "stackweaver"),
+		Password:        getEnv("DATABASE_PASSWORD", "stackweaver_password"),
+		DBName:          getEnv("DATABASE_NAME", "stackweaver"),
 		SSLMode:         getEnv("DATABASE_SSLMODE", "disable"),
 		MaxOpenConns:    10,
 		MaxIdleConns:    5,
