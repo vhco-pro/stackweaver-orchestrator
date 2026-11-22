@@ -689,7 +689,7 @@ func processChangeRequestNotifications(
 			continue
 		}
 
-		teams, terr := rbacSvc.ListTeamsWithWorkspaceAccess(
+		teams, terr := rbacSvc.ListTeamsWithWorkspaceAccess(ctx,
 			cr.Workspace.Project.OrganizationID, cr.Workspace.ProjectID, cr.WorkspaceID)
 		if terr != nil {
 			// Do NOT advance the marker: this is a lookup failure, not a delivery failure, so the
