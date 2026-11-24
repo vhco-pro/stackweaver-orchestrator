@@ -129,7 +129,7 @@ func main() {
 	} else if azureDevOpsManager != nil && azureDevOpsManager.IsEnabled() {
 		// Create a connUpdater that persists token changes to the database
 		connUpdater := func(conn *models.VCSConnection) error {
-			return vcsConnectionRepo.Update(conn)
+			return vcsConnectionRepo.UpdateTokens(conn)
 		}
 		adoStatusService = vcs.NewAzureDevOpsStatusService(azureDevOpsManager, connUpdater)
 		logger.Info("Azure DevOps status check service initialized for PR status checks")
@@ -152,7 +152,7 @@ func main() {
 
 	// Create a provider registry for ADO token refresh
 	vcsRegistry := vcs.NewProviderRegistry(githubAppManager, azureDevOpsManager, func(conn *models.VCSConnection) error {
-		return vcsConnectionRepo.Update(conn)
+		return vcsConnectionRepo.UpdateTokens(conn)
 	}, atRestCrypto)
 
 	// Workspace run-notification delivery (tfe_notification_configuration). The HMAC token is decrypted
