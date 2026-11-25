@@ -19,6 +19,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/google/uuid"
 	"github.com/michielvha/stackweaver/core/dbtest"
+	"github.com/michielvha/stackweaver/core/dbtest/testschema"
 	"github.com/michielvha/stackweaver/core/models"
 	"github.com/michielvha/stackweaver/core/queue"
 	"github.com/michielvha/stackweaver/core/repository"
@@ -34,7 +35,7 @@ func TestProcessPendingRuns_RoutesAndEnqueuesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.AutoMigrate(db); err != nil {
+	if err := testschema.Ensure(db); err != nil {
 		t.Fatal(err)
 	}
 	mr := miniredis.RunT(t)
@@ -117,7 +118,7 @@ func TestRequestRunConfiguration_OneSnapshotPerRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.AutoMigrate(db); err != nil {
+	if err := testschema.Ensure(db); err != nil {
 		t.Fatal(err)
 	}
 	sfx := uuid.NewString()[:8]
@@ -181,7 +182,7 @@ func TestRequestRunConfiguration_ConvertsRunsFromBeforeTheUpgrade(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := models.AutoMigrate(db); err != nil {
+	if err := testschema.Ensure(db); err != nil {
 		t.Fatal(err)
 	}
 	sfx := uuid.NewString()[:8]
